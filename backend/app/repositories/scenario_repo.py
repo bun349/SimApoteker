@@ -1,5 +1,8 @@
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
+import uuid
+from venv import logger
 
 
 class SupabaseSimulationRepository:
@@ -82,7 +85,7 @@ class SupabaseSimulationRepository:
             student_row=student_row,
             patient_row=patient_row,
         )
-        
+
     def _create_session_with_opening_sync(
         self,
         *,
@@ -92,8 +95,11 @@ class SupabaseSimulationRepository:
         opening_text: str,
         waktu_mulai_detik: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        # 1. Buat record sesi simulasi (status awal berjalan)
+        now_utc = datetime.now(timezone.utc)
+        kode_sesi = f"SES-{now_utc.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+
         session_payload = {
+            "kode_sesi": kode_sesi,
             "id_skenario": skenario_id,
             "id_mahasiswa": id_mahasiswa,
             "mode": mode,
@@ -102,18 +108,32 @@ class SupabaseSimulationRepository:
         ses_res = self.db.table("sesi_simulasi").insert(session_payload).execute()
         ses_rows = ses_res.data or []
         if not ses_rows:
-            raise RuntimeError("Gagal membuat sesi simulasi baru.")
-        session_row = ses_rows[0]
-        session_id = session_row["id"]
+            fallback_ses = (
+                self.db.table("sesi_simulasi")
+                .select("*")
+                .eq("kode_sesi", kode_sesi)
+                .limit(1)
+                .execute()
+            )
+            ses_rows = fallback_ses.data or []
 
-        # 2. Catat kalimat pembuka pasien sebagai giliran pertama (urutan_global = 1, PSN-01)
+        if not ses_rows:
+            raise RuntimeError(
+                f"Insert sesi_simulasi tidak mengembalikan baris (kode_sesi={kode_sesi})."
+            )
+
+        session_row = ses_rows[0]
+        session_id = session_row.get("id")
+        if not session_id:
+            raise RuntimeError("Baris sesi_simulasi tidak memiliki kolom 'id'.")
+
         opening_payload = {
             "id_sesi": session_id,
             "urutan_global": 1,
             "kode_giliran": "PSN-01",
             "nomor_giliran_pembicara": 1,
             "pembicara": "pasien",
-            "waktu_mulai_detik": waktu_mulai_detik,
+            "waktu_mulai_detik": int(waktu_mulai_detik),
             "teks": opening_text,
             "pemicu_terkait": None,
             "status_asr_valid": True,
@@ -121,7 +141,20 @@ class SupabaseSimulationRepository:
         tr_res = self.db.table("transkrip_dialog").insert(opening_payload).execute()
         tr_rows = tr_res.data or []
         if not tr_rows:
-            raise RuntimeError("Gagal menyimpan kalimat pembuka ke transkrip_dialog.")
+            fallback_tr = (
+                self.db.table("transkrip_dialog")
+                .select("*")
+                .eq("id_sesi", session_id)
+                .eq("kode_giliran", "PSN-01")
+                .limit(1)
+                .execute()
+            )
+            tr_rows = fallback_tr.data or []
+
+        if not tr_rows:
+            raise RuntimeError(
+                f"Insert transkrip_dialog gagal mengembalikan baris untuk id_sesi={session_id}."
+            )
 
         return session_row, tr_rows[0]
 
@@ -142,3 +175,112 @@ class SupabaseSimulationRepository:
             opening_text=opening_text,
             waktu_mulai_detik=waktu_mulai_detik,
         )
+
+    def _get_session_sync(self, session_id: str) -> dict[str, Any] | None:
+        res = (
+            self.db.table("sesi_simulasi")
+            .select(
+                "id, kode_sesi, id_skenario, id_mahasiswa, mode, "
+                "jumlah_giliran_mahasiswa, jumlah_giliran_valid, "
+                "semua_pemicu_tergali, status_evaluasi, perlu_ditinjau_dosen, "
+                "alasan_tinjau_dosen, penanda_khusus, waktu_mulai, waktu_selesai"
+            )
+            .eq("id", session_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    async def get_session_by_id(self, session_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_session_sync, session_id)
+
+    def _get_scenario_finish_sync(self, skenario_id: str) -> dict[str, Any] | None:
+        res = (
+            self.db.table("skenario_praktikum")
+            .select(
+                "id, profil_pasien, kalimat_pembuka, konfigurasi_pemicu, butir_tidak_berlaku"
+            )
+            .eq("id", skenario_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    async def get_scenario_finish_data(self, skenario_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_scenario_finish_sync, skenario_id)
+
+    def _mark_session_finished_sync(
+        self,
+        *,
+        session_id: str,
+        durasi_detik: int,
+        status_evaluasi: str,
+        farewell_row: dict[str, Any] | None = None,
+        extra_session_updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if farewell_row:
+            self.db.table("transkrip_dialog").insert(farewell_row).execute()
+
+        allowed_columns = {
+            "status_evaluasi",
+            "waktu_selesai",
+            "jumlah_giliran_mahasiswa",
+            "jumlah_giliran_valid",
+            "semua_pemicu_tergali",
+            "penanda_khusus",
+            "perlu_ditinjau_dosen",
+            "alasan_tinjau_dosen",
+            "persentase_audio_valid",
+            "jumlah_segmen_vokal_valid",
+        }
+
+        payload: dict[str, Any] = {
+            "status_evaluasi": status_evaluasi,
+            "waktu_selesai": datetime.now(timezone.utc).isoformat(),
+        }
+        if extra_session_updates:
+            for key, val in extra_session_updates.items():
+                if key in allowed_columns:
+                    payload[key] = val
+
+        res = (
+            self.db.table("sesi_simulasi")
+            .update(payload)
+            .eq("id", session_id)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else {"id": session_id, **payload}
+    async def mark_session_finished(
+        self,
+        *,
+        session_id: str,
+        durasi_detik: int,
+        status_evaluasi: str,
+        farewell_row: dict[str, Any] | None = None,
+        extra_session_updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._mark_session_finished_sync,
+            session_id=session_id,
+            durasi_detik=durasi_detik,
+            status_evaluasi=status_evaluasi,
+            farewell_row=farewell_row,
+            extra_session_updates=extra_session_updates,
+        )
+    
+    def _discard_session_and_transcript_sync(self, session_id: str) -> bool:
+        self.db.table("transkrip_dialog").delete().eq("id_sesi", session_id).execute()
+        res = self.db.table("sesi_simulasi").delete().eq("id", session_id).execute()
+        deleted = bool(res.data)
+        if not deleted:
+            logger.warning(
+                "discard_session_and_transcript: tidak ada baris sesi terhapus untuk session_id=%s (cek RLS/service key atau id sesi)",
+                session_id,
+            )
+        return deleted
+
+    async def discard_session_and_transcript(self, session_id: str) -> bool:
+        return await asyncio.to_thread(self._discard_session_and_transcript_sync, session_id)

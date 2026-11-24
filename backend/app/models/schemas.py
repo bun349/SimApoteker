@@ -135,3 +135,31 @@ class StartSimulationResponse(BaseModel):
     opening_text: str
     persona_context: PatientPersonaContext
     created_at: datetime
+    
+class FinishChecklistItem(BaseModel):
+    key: str
+    label: str
+    satisfied: bool
+
+
+class SimulationFinishRequest(BaseModel):
+    session_id: str
+    skenario_id: str
+    durasi_detik: int = 0
+    mode: str | None = None
+    force_finish: bool = False
+    discard_on_force_finish: bool = False
+
+
+class SimulationFinishResponse(BaseModel):
+    session_id: str
+    skenario_id: str | None = None
+    can_finish: bool
+    status_evaluasi: str
+    all_triggers_covered: bool
+    follow_up_plan_delivered: bool
+    missing_items: list[str] = Field(default_factory=list)
+    checklist: list[FinishChecklistItem] = Field(default_factory=list)
+    farewell_message: str | None = None
+    finished_at: datetime | None = None
+    discarded: bool = False

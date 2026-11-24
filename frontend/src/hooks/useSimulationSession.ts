@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { sendSimulationTurnApi, startSimulationApi, type TurnHistoryPayload } from "@/api/simulation";
+import {
+  finishSimulationApi,
+  sendSimulationTurnApi,
+  startSimulationApi,
+  type FinishSimulationApiResponse,
+  type TurnHistoryPayload,
+} from "@/api/simulation";
 import type { Msg } from "@/components/simulation/session/TranscriptPanel";
 import type { CaseMode } from "@/types/simulation";
 import type { EvaluationStatusEnum, PatientPersonaContext } from "@/types/session";
@@ -11,11 +17,38 @@ export function formatMmSs(totalSec: number): string {
   return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+const VALID_STATUSES: EvaluationStatusEnum[] = [
+  "berjalan",
+  "selesai otomatis",
+  "perlu ditinjau dosen",
+  "selesai ditinjau",
+  "tidak cukup data",
+  "tidak dapat dinilai",
+];
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isValidUuid(value: string | null | undefined): value is string {
+  return typeof value === "string" && UUID_REGEX.test(value.trim());
+}
+
+function normalizeEvaluationStatus(raw?: string): EvaluationStatusEnum {
+  if (raw && (VALID_STATUSES as string[]).includes(raw)) {
+    return raw as EvaluationStatusEnum;
+  }
+  if (raw === "menunggu_evaluasi" || raw === "selesai") {
+    return "selesai otomatis";
+  }
+  return "berjalan";
+}
+
 interface UseSimulationSessionParams {
   skenarioId: string;
   mode: CaseMode;
   idMahasiswa: string;
   studentName?: string;
+  allowLocalFallback?: boolean;
 }
 
 export function useSimulationSession({
@@ -23,8 +56,10 @@ export function useSimulationSession({
   mode,
   idMahasiswa,
   studentName = "Mahasiswa",
+  allowLocalFallback = true,
 }: UseSimulationSessionParams) {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isLocalMode, setIsLocalMode] = useState(false);
   const [evaluationStatus, setEvaluationStatus] = useState<EvaluationStatusEnum>("berjalan");
   const [personaContext, setPersonaContext] = useState<PatientPersonaContext | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -32,9 +67,11 @@ export function useSimulationSession({
   const [elapsedSec, setElapsedSec] = useState(0);
   const [isStarting, setIsStarting] = useState(true);
   const [isSending, setIsSending] = useState(false);
+  const [isFinishing, setIsFinishing] = useState(false);
+  const [finishResult, setFinishResult] = useState<FinishSimulationApiResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const startedRef = useRef(false);
+  const startedKeyRef = useRef<string | null>(null);
 
   // Timer sesi berjalan selama status "berjalan"
   useEffect(() => {
@@ -45,29 +82,64 @@ export function useSimulationSession({
     return () => window.clearInterval(timer);
   }, [sessionId, evaluationStatus]);
 
-  // Mulai sesi otomatis saat halaman dibuka
-  useEffect(() => {
-    if (!skenarioId || !idMahasiswa || startedRef.current) return;
-    startedRef.current = true;
+  const initializeSession = useCallback(
+    async (options?: { force?: boolean; currentElapsedSec?: number }) => {
+      if (!skenarioId) return null;
 
-    let cancelled = false;
-    (async () => {
+      const startSec = Math.max(0, Math.floor(options?.currentElapsedSec ?? 0));
       setIsStarting(true);
       setError(null);
+      if (options?.force) {
+        setFinishResult(null);
+      }
+
+      const activateLocalTestSession = (reason?: string) => {
+        if (!allowLocalFallback) {
+          setError(reason || "Gagal memulai sesi.");
+          setIsStarting(false);
+          return null;
+        }
+        const localSid = `local-test-${Date.now()}`;
+        setSessionId(localSid);
+        setIsLocalMode(true);
+        setEvaluationStatus("berjalan");
+        setElapsedSec(startSec);
+        setStudentTurnCount(0);
+        setMessages([
+          {
+            id: `opening-${localSid}`,
+            from: "pasien",
+            name: "Pasien (Mode Uji Ketik)",
+            time: formatMmSs(startSec),
+            text: "Halo Mbak/Mas, saya mau tanya soal keluhan dan obat saya. Silakan mulai konselingnya.",
+          },
+        ]);
+        if (reason) {
+          setError(`Mode uji ketik aktif (${reason}).`);
+        }
+        setIsStarting(false);
+        return localSid;
+      };
+
+      if (!idMahasiswa) {
+        return activateLocalTestSession("ID mahasiswa belum tersedia");
+      }
+
       try {
         const started = await startSimulationApi({
           skenarioId,
           mode,
           idMahasiswa,
-          waktuMulaiDetik: 0,
+          waktuMulaiDetik: startSec,
         });
-        if (cancelled) return;
 
         setSessionId(started.sessionId);
-        setEvaluationStatus(started.evaluationStatus);
+        setIsLocalMode(false);
+        setEvaluationStatus(normalizeEvaluationStatus(started.evaluationStatus));
         setPersonaContext(started.personaContext);
-        setElapsedSec(0);
+        setElapsedSec(startSec);
         setStudentTurnCount(0);
+        setFinishResult(null);
 
         const patientLabel = `Pasien (${started.personaContext.patient.nama})`;
         setMessages([
@@ -75,34 +147,46 @@ export function useSimulationSession({
             id: started.openingTurnId,
             from: "pasien",
             name: patientLabel,
-            time: formatMmSs(0),
+            time: formatMmSs(startSec),
             text: started.openingText,
           },
         ]);
+        setIsStarting(false);
+        return started.sessionId;
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Gagal memulai sesi.");
-        }
-      } finally {
-        if (!cancelled) setIsStarting(false);
+        return activateLocalTestSession(
+          err instanceof Error ? err.message : "Backend /start belum merespons",
+        );
       }
-    })();
+    },
+    [skenarioId, mode, idMahasiswa, allowLocalFallback],
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [skenarioId, mode, idMahasiswa]);
+  // Mulai sesi saat halaman dibuka atau parameter utama berubah
+  useEffect(() => {
+    if (!skenarioId) return;
+    const initKey = `${skenarioId}::${mode}::${idMahasiswa}`;
+    if (startedKeyRef.current === initKey) return;
+    startedKeyRef.current = initKey;
+
+    void initializeSession({ force: true, currentElapsedSec: 0 });
+  }, [skenarioId, mode, idMahasiswa, initializeSession]);
+
+  const retryStartSession = useCallback(async () => {
+    startedKeyRef.current = `${skenarioId}::${mode}::${idMahasiswa}`;
+    return initializeSession({ force: true, currentElapsedSec: 0 });
+  }, [skenarioId, mode, idMahasiswa, initializeSession]);
 
   const sendMessage = useCallback(
     async (rawText: string, options?: { waktuMulaiDetik?: number; statusAsrValid?: boolean }) => {
       const cleanText = rawText.trim();
-      if (!cleanText || !sessionId || isSending) return;
+      if (!cleanText || isSending || isFinishing || evaluationStatus !== "berjalan") return;
 
       setIsSending(true);
       setError(null);
 
       const turnSec = options?.waktuMulaiDetik ?? elapsedSec;
-      const patientLabel = `Pasien (${personaContext?.patient.nama ?? "Pasien"})`;
+      const patientLabel = `Pasien (${personaContext?.patient.nama ?? (isLocalMode ? "Mode Uji Ketik" : "Pasien")})`;
       const studentLabel = `Anda (${studentName})`;
       const tempStudentId = `tmp-mhs-${Date.now()}`;
 
@@ -114,7 +198,6 @@ export function useSimulationSession({
         text: cleanText,
       };
 
-      // Riwayat dikirim sebagai fallback konteks; sumber urutan utama tetap di transkrip_dialog backend
       const historyPayload: TurnHistoryPayload[] = messages.map((m) => ({
         role: m.from === "anda" ? "student" : "patient",
         text: m.text,
@@ -123,8 +206,22 @@ export function useSimulationSession({
       setMessages((prev) => [...prev, optimisticStudentMsg]);
 
       try {
+        let targetSessionId = sessionId;
+
+        // Jika masih memakai ID lokal padahal idMahasiswa tersedia, sinkronkan ke backend /start dulu
+        if (!isValidUuid(targetSessionId) && idMahasiswa) {
+          const syncedId = await initializeSession({ force: false, currentElapsedSec: turnSec });
+          if (isValidUuid(syncedId)) {
+            targetSessionId = syncedId;
+          }
+        }
+
+        if (!isValidUuid(targetSessionId)) {
+          throw new Error("Sesi belum memiliki session_id UUID valid dari server.");
+        }
+
         const res = await sendSimulationTurnApi({
-          sessionId,
+          sessionId: targetSessionId,
           skenarioId,
           mode,
           studentMessage: cleanText,
@@ -133,13 +230,15 @@ export function useSimulationSession({
           history: historyPayload,
         });
 
-        setEvaluationStatus(res.evaluationStatus);
+        setIsLocalMode(false);
+        setEvaluationStatus(normalizeEvaluationStatus(res.evaluationStatus));
         setStudentTurnCount(res.studentTurnCount);
 
+        const resolvedPatientLabel = `Pasien (${personaContext?.patient.nama ?? "Pasien"})`;
         const patientReplyMsg: Msg = {
           id: res.turnId,
           from: "pasien",
-          name: patientLabel,
+          name: resolvedPatientLabel,
           time: formatMmSs(elapsedSec),
           text: res.replyText,
         };
@@ -149,18 +248,163 @@ export function useSimulationSession({
           patientReplyMsg,
         ]);
       } catch (err) {
-        setMessages((prev) => prev.filter((m) => m.id !== tempStudentId));
-        setError(err instanceof Error ? err.message : "Gagal memproses balasan pasien.");
+        if (allowLocalFallback) {
+          const fallbackSid = sessionId ?? `local-test-${Date.now()}`;
+          if (!sessionId) setSessionId(fallbackSid);
+          const nextCount = studentTurnCount + 1;
+          setIsLocalMode(true);
+          setStudentTurnCount(nextCount);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `local-reply-${Date.now()}`,
+              from: "pasien",
+              name: patientLabel,
+              time: formatMmSs(elapsedSec),
+              text: `[Balasan Lokal Uji Ketik] Saya mengerti terkait: "${cleanText}". Ada lagi yang ingin ditanyakan atau dijelaskan?`,
+            },
+          ]);
+          setError(
+            err instanceof Error
+              ? `Endpoint /turn belum aktif (${err.message}). Menampilkan balasan lokal untuk tes ketik.`
+              : "Endpoint /turn belum aktif. Menampilkan balasan lokal untuk tes ketik.",
+          );
+        } else {
+          setMessages((prev) => prev.filter((m) => m.id !== tempStudentId));
+          setError(err instanceof Error ? err.message : "Gagal memproses balasan pasien.");
+        }
       } finally {
         setIsSending(false);
       }
     },
-    [sessionId, isSending, elapsedSec, personaContext, studentName, messages, skenarioId, mode],
+    [
+      sessionId,
+      isSending,
+      isFinishing,
+      evaluationStatus,
+      elapsedSec,
+      personaContext,
+      isLocalMode,
+      studentName,
+      messages,
+      idMahasiswa,
+      initializeSession,
+      skenarioId,
+      mode,
+      allowLocalFallback,
+      studentTurnCount,
+    ],
   );
+
+  const finishSession = useCallback(
+    async (options?: {
+      forceFinish?: boolean;
+      discardOnForceFinish?: boolean;
+    }) => {
+      if (!sessionId || isFinishing || isSending) return null;
+
+      setIsFinishing(true);
+      setError(null);
+
+      try {
+        if (!isValidUuid(sessionId)) {
+          throw new Error("Sesi lokal tidak memiliki UUID server untuk /finish.");
+        }
+
+        const res = await finishSimulationApi({
+          sessionId,
+          skenarioId,
+          mode,
+          durasiDetik: elapsedSec,
+          forceFinish: options?.forceFinish ?? false,
+          discardOnForceFinish: options?.discardOnForceFinish ?? false,
+        });
+
+        const normalizedStatus = normalizeEvaluationStatus(res.evaluationStatus);
+        const normalizedRes: FinishSimulationApiResponse = {
+          ...res,
+          evaluationStatus: normalizedStatus,
+        };
+
+        setFinishResult(normalizedRes);
+
+        if (res.canFinish) {
+          setEvaluationStatus(normalizedStatus);
+        }
+
+        if (res.canFinish && res.farewellMessage) {
+          const patientLabel = `Pasien (${personaContext?.patient.nama ?? "Pasien"})`;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `farewell-${sessionId}`,
+              from: "pasien",
+              name: patientLabel,
+              time: formatMmSs(elapsedSec),
+              text: res.farewellMessage!,
+            },
+          ]);
+        }
+
+        return normalizedRes;
+      } catch (err) {
+        if (allowLocalFallback || isLocalMode) {
+          const farewell =
+            "Baik, terima kasih banyak atas penjelasannya ya. Saya pamit dulu (sesi uji ketik selesai).";
+          const patientLabel = `Pasien (${personaContext?.patient.nama ?? "Mode Uji Ketik"})`;
+          const localStatus: EvaluationStatusEnum = "selesai otomatis";
+          const localFinish: FinishSimulationApiResponse = {
+            sessionId,
+            canFinish: true,
+            evaluationStatus: localStatus,
+            allTriggersCovered: true,
+            followUpPlanDelivered: true,
+            missingItems: [],
+            checklist: [],
+            farewellMessage: farewell,
+            finishedAt: new Date().toISOString(),
+          };
+          setFinishResult(localFinish);
+          setEvaluationStatus(localStatus);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `farewell-local-${Date.now()}`,
+              from: "pasien",
+              name: patientLabel,
+              time: formatMmSs(elapsedSec),
+              text: farewell,
+            },
+          ]);
+          return localFinish;
+        }
+        setError(err instanceof Error ? err.message : "Gagal menyelesaikan sesi.");
+        return null;
+      } finally {
+        setIsFinishing(false);
+      }
+    },
+    [
+      sessionId,
+      isFinishing,
+      isSending,
+      skenarioId,
+      mode,
+      elapsedSec,
+      personaContext,
+      allowLocalFallback,
+      isLocalMode,
+    ],
+  );
+
+  const isSessionFinished = evaluationStatus !== "berjalan";
+  const canFinishSession = studentTurnCount >= 1 && !isSending && !isFinishing && !isSessionFinished;
 
   return {
     sessionId,
+    isLocalMode,
     evaluationStatus,
+    isSessionFinished,
     personaContext,
     messages,
     studentTurnCount,
@@ -168,7 +412,12 @@ export function useSimulationSession({
     elapsedLabel: formatMmSs(elapsedSec),
     isStarting,
     isSending,
+    isFinishing,
+    canFinishSession,
+    finishResult,
     error,
     sendMessage,
+    finishSession,
+    retryStartSession,
   };
 }

@@ -5,9 +5,12 @@ from app.models.schemas import (
     SimulationTurnResponse,
     StartSimulationRequest,
     StartSimulationResponse,
+    SimulationFinishRequest,
+    SimulationFinishResponse,
 )
 from app.repositories.scenario_repo import SupabaseSimulationRepository
 from app.services.simulation.turn_service import SimulationTurnService
+from app.services.simulation.finish_service import SimulationFinishService, get_finish_service
 
 router = APIRouter(prefix="/api/simulation", tags=["simulation"])
 
@@ -51,7 +54,7 @@ async def post_simulation_start(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Terjadi kesalahan saat memulai sesi simulasi.",
+            detail=f"Gagal memulai sesi simulasi: {type(exc).__name__}: {exc}",
         ) from exc
 
 @router.post(
@@ -78,5 +81,27 @@ async def post_simulation_turn(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Terjadi kesalahan saat memproses giliran simulasi.",
+            detail=f"Gagal memproses giliran simulasi ({type(exc).__name__}): {exc}",
+        ) from exc
+        
+@router.post(
+    "/finish",
+    response_model=SimulationFinishResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def post_simulation_finish(
+    payload: SimulationFinishRequest,
+    finish_service: SimulationFinishService = Depends(get_finish_service),
+) -> SimulationFinishResponse:
+    try:
+        return await finish_service.finish_session(payload)
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal memproses giliran simulasi ({type(exc).__name__}): {exc}",
         ) from exc

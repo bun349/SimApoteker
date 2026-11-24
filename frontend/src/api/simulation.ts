@@ -109,3 +109,75 @@ export async function sendSimulationTurnApi(params: {
     createdAt: data.created_at,
   };
 }
+
+export interface FinishChecklistItem {
+  key: string;
+  label: string;
+  satisfied: boolean;
+}
+
+export interface FinishSimulationApiResponse {
+  sessionId: string;
+  canFinish: boolean;
+  evaluationStatus: EvaluationStatusEnum;
+  allTriggersCovered: boolean;
+  followUpPlanDelivered: boolean;
+  missingItems: string[];
+  checklist: FinishChecklistItem[];
+  farewellMessage: string | null;
+  finishedAt: string | null;
+}
+
+export interface FinishSimulationApiResponse {
+  sessionId: string;
+  canFinish: boolean;
+  evaluationStatus: EvaluationStatusEnum;
+  allTriggersCovered: boolean;
+  followUpPlanDelivered: boolean;
+  missingItems: string[];
+  checklist: FinishChecklistItem[];
+  farewellMessage: string | null;
+  finishedAt: string | null;
+  discarded?: boolean;
+}
+
+export async function finishSimulationApi(params: {
+  sessionId: string;
+  skenarioId: string;
+  mode: CaseMode;
+  durasiDetik: number;
+  forceFinish?: boolean;
+  discardOnForceFinish?: boolean;
+}): Promise<FinishSimulationApiResponse> {
+  const res = await fetch(`${API_BASE}/api/simulation/finish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: params.sessionId,
+      skenario_id: params.skenarioId,
+      mode: params.mode,
+      durasi_detik: params.durasiDetik,
+      force_finish: params.forceFinish ?? false,
+      discard_on_force_finish: params.discardOnForceFinish ?? false,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail || "Gagal menyelesaikan sesi simulasi.");
+  }
+
+  const data = await res.json();
+  return {
+    sessionId: data.session_id,
+    canFinish: Boolean(data.can_finish),
+    evaluationStatus: data.status_evaluasi,
+    allTriggersCovered: Boolean(data.all_triggers_covered),
+    followUpPlanDelivered: Boolean(data.follow_up_plan_delivered),
+    missingItems: Array.isArray(data.missing_items) ? data.missing_items : [],
+    checklist: Array.isArray(data.checklist) ? data.checklist : [],
+    farewellMessage: typeof data.farewell_message === "string" ? data.farewell_message : null,
+    finishedAt: typeof data.finished_at === "string" ? data.finished_at : null,
+    discarded: Boolean(data.discarded),
+  };
+}

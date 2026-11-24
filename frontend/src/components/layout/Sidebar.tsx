@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { NavLink, useLocation } from "react-router";
 import { 
   LayoutDashboard, 
-  ClipboardList, 
   History, 
   Settings,
   BookOpenCheck,
@@ -37,7 +36,6 @@ const navByRole: Record<Role, NavGroup[]> = {
       heading: "Praktikum & Simulasi",
       items: [
         { to: "/", label: "Dashboard Mahasiswa", icon: LayoutDashboard, end: true },
-        { to: "/rapor", label: "Rapor Evaluasi", icon: ClipboardList },
         { to: "/riwayat", label: "Riwayat Simulasi", icon: History },
       ],
     },

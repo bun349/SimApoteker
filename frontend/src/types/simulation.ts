@@ -146,3 +146,41 @@ export interface ChronicPrescription {
   addressLine: string;
   stamp: string;
 }
+
+// =========================================
+// 8. TIPE PENYELESAIAN SESI (FINISH & FORCE FINISH)
+// =========================================
+export type SessionEvaluationEnum =
+  | "berjalan"
+  | "selesai_otomatis"
+  | "perlu_ditinjau_dosen"
+  | "selesai_ditinjau"
+  | "tidak_cukup_data"
+  | "tidak_dapat_dinilai";
+
+export interface FinishChecklistItem {
+  key: string;
+  label: string;
+  satisfied: boolean;
+}
+
+export interface SimulationFinishPayload {
+  session_id: string;
+  skenario_id: string;
+  durasi_detik: number;
+  mode?: CaseMode;
+  force_finish?: boolean;
+  discard_on_force_finish?: boolean;
+}
+
+export interface SimulationFinishResult {
+  session_id: string;
+  can_finish: boolean;
+  status_evaluasi: SessionEvaluationEnum | string;
+  all_triggers_covered: boolean;
+  follow_up_plan_delivered: boolean;
+  missing_items: string[];
+  checklist: FinishChecklistItem[];
+  farewell_message: string | null;
+  finished_at: string | null;
+}

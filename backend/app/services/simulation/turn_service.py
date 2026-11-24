@@ -4,9 +4,9 @@ from typing import Any, Protocol
 from app.models.schemas import (
     SimulationTurnRequest,
     SimulationTurnResponse,
-    TurnHistoryItem,
     StartSimulationRequest,
     StartSimulationResponse,
+    TurnHistoryItem,
 )
 from app.services.simulation.context_builder import build_patient_persona_context
 from app.services.simulation.gemini_patient import GeminiPatientService
@@ -19,6 +19,16 @@ class SimulationRepository(Protocol):
         skenario_id: str,
         mode: str,
     ) -> dict[str, Any] | None: ...
+
+    async def create_session_with_opening(
+        self,
+        *,
+        skenario_id: str,
+        mode: str,
+        id_mahasiswa: str,
+        opening_text: str,
+        waktu_mulai_detik: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
 
     async def get_session_transcript(self, session_id: str) -> list[dict[str, Any]]: ...
 
@@ -35,6 +45,14 @@ def _fmt_kode(prefix: str, num: int) -> str:
     return f"{prefix}-{num:02d}"
 
 
+def _parse_dt(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value.strip():
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    return datetime.now(timezone.utc)
+
+
 class SimulationTurnService:
     def __init__(
         self,
@@ -44,7 +62,7 @@ class SimulationTurnService:
     ) -> None:
         self.repo = repo
         self.patient_service = patient_service or GeminiPatientService()
-    
+
     async def start_session(self, req: StartSimulationRequest) -> StartSimulationResponse:
         scenario_row = await self.repo.get_scenario_for_simulation(
             skenario_id=req.skenario_id,
@@ -54,19 +72,22 @@ class SimulationTurnService:
             raise LookupError("Skenario tidak ditemukan atau tidak tersedia untuk mode simulasi ini.")
 
         persona_context = build_patient_persona_context(scenario_row)
-        opening_text = persona_context.opening_line.strip()
+        opening_text = (persona_context.opening_line or "").strip()
         if not opening_text:
             raise ValueError("Kalimat pembuka skenario belum tersedia.")
 
-        session_row, opening_row = await self.repo.create_session_with_opening(
+        created_pair = await self.repo.create_session_with_opening(
             skenario_id=req.skenario_id,
             mode=req.mode,
             id_mahasiswa=req.id_mahasiswa,
             opening_text=opening_text,
             waktu_mulai_detik=req.waktu_mulai_detik,
         )
+        if not created_pair or len(created_pair) < 2 or not created_pair[0] or not created_pair[1]:
+            raise RuntimeError("Data sesi atau kalimat pembuka gagal dibuat oleh repository.")
 
-        created_at = session_row.get("created_at") or opening_row.get("created_at") or datetime.now(timezone.utc)
+        session_row, opening_row = created_pair
+        created_at = _parse_dt(session_row.get("created_at") or opening_row.get("created_at"))
 
         return StartSimulationResponse(
             session_id=str(session_row["id"]),
@@ -153,13 +174,16 @@ class SimulationTurnService:
             "status_asr_valid": True,
         }
 
-        saved_student, saved_patient = await self.repo.save_turn_pair(
+        saved_pair = await self.repo.save_turn_pair(
             session_id=req.session_id,
             student_row=student_payload,
             patient_row=patient_payload,
         )
+        if not saved_pair or len(saved_pair) < 2 or not saved_pair[0] or not saved_pair[1]:
+            raise RuntimeError("Pasangan giliran percakapan gagal disimpan oleh repository.")
 
-        created_at = saved_patient.get("created_at") or datetime.now(timezone.utc)
+        saved_student, saved_patient = saved_pair
+        created_at = _parse_dt(saved_patient.get("created_at"))
 
         return SimulationTurnResponse(
             session_id=req.session_id,
@@ -172,5 +196,3 @@ class SimulationTurnService:
             student_turn_count=next_mhs_num,
             created_at=created_at,
         )
-        
-        

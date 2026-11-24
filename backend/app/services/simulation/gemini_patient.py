@@ -1,3 +1,4 @@
+import re
 from google import genai
 from google.genai import types
 
@@ -117,6 +118,7 @@ ATURAN KETAT PERAN:
 4. Jika mahasiswa menggunakan istilah teknis/medis yang belum kamu pahami sesuai tingkat literasimu, bereaksilah secara wajar (misalnya meminta dijelaskan dengan bahasa yang lebih mudah dipahami).
 5. Jika mahasiswa meminta kamu mengulang penjelasan (teach-back), ulangi pemahamanmu dengan bahasa sendiri secara natural.
 6. Jaga konsistensi dengan identitas, peran (pasien vs pendamping), dan kalimat pembuka.
+7. Selalu selesaikan kalimatmu hingga tuntas dengan tanda baca akhir yang wajar; jangan pernah berhenti di tengah kalimat.
 """.strip()
 
 
@@ -124,15 +126,26 @@ def _map_history_to_contents(
     history: list[TurnHistoryItem],
     student_message: str,
 ) -> list[types.Content]:
+    items = list(history)
+    if (
+        items
+        and items[-1].role == "student"
+        and items[-1].text.strip() == student_message.strip()
+    ):
+        items = items[:-1]
+
     contents: list[types.Content] = []
-    for item in history:
+    for item in items:
         role = "user" if item.role == "student" else "model"
-        contents.append(
-            types.Content(
-                role=role,
-                parts=[types.Part.from_text(text=item.text)],
+        text = (item.text or "").strip()
+        if text:
+            contents.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part.from_text(text=text)],
+                )
             )
-        )
+
     contents.append(
         types.Content(
             role="user",
@@ -140,6 +153,32 @@ def _map_history_to_contents(
         )
     )
     return contents
+
+
+def _build_config(system_instruction: str, max_tokens: int = 768) -> types.GenerateContentConfig:
+    kwargs: dict[str, object] = {
+        "system_instruction": system_instruction,
+        "temperature": 0.7,
+        "max_output_tokens": max_tokens,
+    }
+    thinking_cls = getattr(types, "ThinkingConfig", None)
+    if thinking_cls is not None:
+        try:
+            kwargs["thinking_config"] = thinking_cls(thinking_budget=128)
+        except TypeError:
+            pass
+    return types.GenerateContentConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def _is_truncated_reply(text: str, finish_reason: object) -> bool:
+    reason_str = str(finish_reason or "").upper()
+    if "MAX_TOKENS" in reason_str:
+        return True
+    trimmed = text.strip()
+    if not trimmed:
+        return True
+    # Terlihat terpotong jika tidak diakhiri tanda baca kalimat/tutup wajar
+    return not re.search(r'[.!?…"\')\]»]$', trimmed)
 
 
 class GeminiPatientService:
@@ -156,18 +195,39 @@ class GeminiPatientService:
     ) -> str:
         system_instruction = build_patient_system_prompt(persona_context)
         contents = _map_history_to_contents(history, student_message)
+        config = _build_config(system_instruction, max_tokens=768)
 
         response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-                max_output_tokens=300,
-            ),
+            config=config,
         )
 
         reply = (response.text or "").strip()
+        finish_reason = None
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            finish_reason = getattr(candidates[0], "finish_reason", None)
+
+        if _is_truncated_reply(reply, finish_reason):
+            retry_prompt = (
+                f"{student_message}\n\n"
+                "(Catatan sistem: berikan jawaban lengkap dalam 2-4 kalimat wajar sesuai karakter dan akhiri dengan tanda baca penuh.)"
+            )
+            retry_contents = _map_history_to_contents(history, retry_prompt)
+            retry_response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=retry_contents,
+                config=_build_config(system_instruction, max_tokens=896),
+            )
+            retry_reply = (retry_response.text or "").strip()
+            if retry_reply and (
+                not reply
+                or len(retry_reply) > len(reply)
+                or not _is_truncated_reply(retry_reply, None)
+            ):
+                reply = retry_reply
+
         if not reply:
             raise RuntimeError("Gemini mengembalikan respons kosong.")
         return reply
