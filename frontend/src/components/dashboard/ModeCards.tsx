@@ -1,72 +1,184 @@
-// components/dashboard/ModeCards.tsx
-import { ArrowRight, Brain, CalendarCheck, ClipboardCheck } from "lucide-react";
-import { Link } from "react-router";
-import type { Student } from "@/types/simulation";
-import { formatDeadline } from "@/lib/utils";
+import { ArrowRight, BookOpen, Calendar, ClipboardCheck } from "lucide-react";
+import type { CaseMode, Student } from "@/types/simulation";
+import { cn, formatDeadline } from "@/lib/utils";
 
-export function ModeCards({ student }: { student: Student }) {
-  const practicum = student.activeMode === "practicum";
+interface ModeCardsProps {
+  student: Student;
+  selectedMode: CaseMode;
+  onSelectMode: (mode: CaseMode) => void;
+}
+
+export function ModeCards({ student, selectedMode, onSelectMode }: ModeCardsProps) {
+  const isMandiriActive = selectedMode === "mandiri";
+  const isPraktikumActive = selectedMode === "praktikum";
+
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      {/* Latihan Mandiri */}
-      <section className="flex flex-col rounded-2xl border border-line bg-white p-6 shadow-sm">
-        <div className="flex items-start justify-between">
-          <div className="grid h-12 w-12 place-items-center rounded-xl bg-cream text-navy-900">
-            <Brain size={22} />
-          </div>
-          <span className="rounded-full bg-cream px-3 py-1 text-[11px] font-medium text-muted">
-            Tanpa Batas Penilaian
+    <div className="grid gap-5 lg:grid-cols-2">
+      {/* Kartu Latihan Mandiri */}
+      <section
+        onClick={() => onSelectMode("mandiri")}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelectMode("mandiri");
+          }
+        }}
+        className={cn(
+          "flex cursor-pointer flex-col rounded-2xl border p-6 text-left transition",
+          isMandiriActive
+            ? "border-navy-900 bg-navy-900 text-white"
+            : "border-line bg-white text-ink hover:border-slate-300",
+        )}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span
+            className={cn(
+              "grid h-10 w-10 place-items-center rounded-xl",
+              isMandiriActive
+                ? "bg-white/10 text-gold-400"
+                : "bg-olive-100 text-olive-700",
+            )}
+          >
+            <BookOpen size={18} />
+          </span>
+          <span
+            className={cn(
+              "rounded-full px-3 py-1 text-xs font-semibold",
+              isMandiriActive
+                ? "bg-gold-400 text-navy-900"
+                : "bg-olive-100 text-olive-700",
+            )}
+          >
+            Latihan Bebas
           </span>
         </div>
-        <h3 className="mt-3 font-serif text-lg font-semibold">Latihan Mandiri</h3>
-        <p className="mt-3 text-sm leading-relaxed text-muted">
-          Belajar bebas tanpa batas waktu penilaian resmi. Eksplorasi teknik konseling KIE, uji
-          respon pasien virtual secara adaptif, dan dapatkan umpan balik formatif instan dari AI.
-        </p>
-        <div className="mt-auto flex items-center justify-between border-t border-line pt-4 text-xs">
-          <span className="flex items-center gap-2 text-muted">
-            <span className="h-2 w-2 rounded-full bg-gray-500" />
-            {student.selfBankCount} Kasus Bank Mandiri
-          </span>
-          <Link to="/simulasi" className="flex items-center gap-1 text-sm font-medium text-navy-900">
-            Pilih Mode Mandiri <ArrowRight size={14} />
-          </Link>
-        </div>
-      </section>
 
-      {/* Praktikum Terjadwal */}
-      <section className="flex flex-col rounded-2xl border-2 border-gold-400 bg-linear-to-br from-navy-900 to-navy-950 p-6 text-white shadow-lg">
-        <div className="flex items-start justify-between">
-          <div className="grid h-12 w-12 place-items-center rounded-xl bg-gold-400 text-navy-900">
-            <ClipboardCheck size={22} />
-          </div>
-          {practicum && (
-            <span className="flex items-center gap-1.5 rounded-full bg-gold-400 px-3 py-1 text-[11px] font-bold uppercase text-navy-900">
-              <span className="h-1.5 w-1.5 rounded-full bg-navy-900" /> Mode Aktif
+        <h3
+          className={cn(
+            "mt-4 text-base font-semibold",
+            isMandiriActive ? "text-white" : "text-ink",
+          )}
+        >
+          Latihan Mandiri
+        </h3>
+        <p
+          className={cn(
+            "mt-1.5 text-sm leading-relaxed",
+            isMandiriActive ? "text-slate-300" : "text-muted",
+          )}
+        >
+          Berlatih konseling KIE secara fleksibel tanpa mempengaruhi nilai resmi, lengkap dengan
+          evaluasi formatif instan.
+        </p>
+
+        <div
+          className={cn(
+            "mt-6 flex items-center justify-between border-t pt-4 text-xs",
+            isMandiriActive ? "border-white/15" : "border-line",
+          )}
+        >
+          <span className={isMandiriActive ? "text-slate-300" : "text-muted"}>
+            {student.selfBankCount} kasus tersedia
+          </span>
+          {isMandiriActive ? (
+            <span className="inline-flex items-center gap-1.5 rounded-lg bg-gold-400 px-3.5 py-1.5 font-semibold text-navy-900">
+              Sedang Ditampilkan
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 font-semibold text-navy-900">
+              Pilih Mode Mandiri <ArrowRight size={14} />
             </span>
           )}
         </div>
-        <h3 className="mt-3 flex items-center gap-2 font-serif text-lg font-semibold">
-          Praktikum Terjadwal
-          <span className="rounded-full bg-gold-400 px-2 py-0.5 font-sans text-[10px] font-bold text-navy-900">
-            {student.mandatoryTasks} Tugas Wajib
-          </span>
-        </h3>
-        <p className="mt-3 text-sm leading-relaxed text-white/90">
-          Sesi tercatat secara resmi untuk evaluasi rubrik PaCT (Patient Consultation Tool). Audio
-          verbatim & analitik empati klinis direkam dan ditinjau dosen penguji.
-        </p>
-        <div className="mt-auto flex items-center justify-between border-t border-white/10 pt-4">
-          <span className="flex items-center gap-2 text-xs font-semibold text-gold-400">
-            <CalendarCheck size={14} /> Tenggat terdekat:{" "}
-            {formatDeadline(student.nearestDeadline).split(",")[0]}
-          </span>
-          <Link
-            to="/praktikum"
-            className="rounded-lg bg-gold-400 px-4 py-2 text-sm font-semibold text-navy-900 hover:brightness-95"
+      </section>
+
+      {/* Kartu Praktikum Terjadwal */}
+      <section
+        onClick={() => onSelectMode("praktikum")}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelectMode("praktikum");
+          }
+        }}
+        className={cn(
+          "flex cursor-pointer flex-col rounded-2xl border p-6 text-left transition",
+          isPraktikumActive
+            ? "border-navy-900 bg-navy-900 text-white"
+            : "border-line bg-white text-ink hover:border-slate-300",
+        )}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span
+            className={cn(
+              "grid h-10 w-10 place-items-center rounded-xl",
+              isPraktikumActive
+                ? "bg-white/10 text-gold-400"
+                : "bg-olive-100 text-olive-700",
+            )}
           >
-            {student.mandatoryTasks} Tugas Wajib
-          </Link>
+            <ClipboardCheck size={18} />
+          </span>
+          <span
+            className={cn(
+              "rounded-full px-3 py-1 text-xs font-semibold",
+              isPraktikumActive
+                ? "bg-gold-400 text-navy-900"
+                : "bg-olive-100 text-olive-700",
+            )}
+          >
+            {student.mandatoryTasks} Tugas Aktif
+          </span>
+        </div>
+
+        <h3
+          className={cn(
+            "mt-4 text-base font-semibold",
+            isPraktikumActive ? "text-white" : "text-ink",
+          )}
+        >
+          Praktikum Terjadwal
+        </h3>
+        <p
+          className={cn(
+            "mt-1.5 text-sm leading-relaxed",
+            isPraktikumActive ? "text-slate-300" : "text-muted",
+          )}
+        >
+          Sesi penilaian resmi berbasis rubrik PaCT dan konten klinis yang tercatat serta dapat
+          ditinjau oleh dosen penguji.
+        </p>
+
+        <div
+          className={cn(
+            "mt-6 flex items-center justify-between border-t pt-4 text-xs",
+            isPraktikumActive ? "border-white/15" : "border-line",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5",
+              isPraktikumActive ? "text-slate-300" : "text-muted",
+            )}
+          >
+            <Calendar size={13} />
+            {student.nearestDeadline
+              ? `Tenggat: ${formatDeadline(student.nearestDeadline).split(",")[0]}`
+              : "Belum ada tenggat"}
+          </span>
+          {isPraktikumActive ? (
+            <span className="inline-flex items-center gap-1.5 rounded-lg bg-gold-400 px-3.5 py-1.5 font-semibold text-navy-900">
+              Sedang Ditampilkan
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 font-semibold text-navy-900">
+              Lihat Tugas <ArrowRight size={14} />
+            </span>
+          )}
         </div>
       </section>
     </div>

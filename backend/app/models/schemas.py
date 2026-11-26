@@ -1,16 +1,19 @@
-from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
 from datetime import datetime
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field
+
 
 class TranscriptTurn(BaseModel):
     giliran: int
     pembicara: str
     teks: str
 
+
 class EvaluationRequest(BaseModel):
     id_sesi: str
     id_skenario: str
     transkrip: List[TranscriptTurn]
+
 
 ModeSesi = Literal["mandiri", "praktikum"]
 JenisSkenario = Literal["swamedikasi", "resep_akut", "resep_kronis"]
@@ -117,12 +120,23 @@ class FinishSimulationResponse(BaseModel):
     session_id: str
     status_evaluasi: StatusEvaluasi
     ended_at: datetime
-    
+
+
 class StartSimulationRequest(BaseModel):
     skenario_id: str
     mode: ModeSesi
     id_mahasiswa: str
     waktu_mulai_detik: int = Field(default=0, ge=0)
+
+
+class ResumedTranscriptItem(BaseModel):
+    id: Optional[str] = None
+    urutan_global: Optional[int] = None
+    kode_giliran: Optional[str] = None
+    nomor_giliran_pembicara: Optional[int] = None
+    pembicara: str
+    waktu_mulai_detik: int = 0
+    teks: str
 
 
 class StartSimulationResponse(BaseModel):
@@ -135,7 +149,11 @@ class StartSimulationResponse(BaseModel):
     opening_text: str
     persona_context: PatientPersonaContext
     created_at: datetime
-    
+    is_resumed: bool = False
+    durasi_aktif_detik: int = Field(default=0, ge=0)
+    transcript: list[ResumedTranscriptItem] = Field(default_factory=list)
+
+
 class FinishChecklistItem(BaseModel):
     key: str
     label: str
@@ -163,3 +181,24 @@ class SimulationFinishResponse(BaseModel):
     farewell_message: str | None = None
     finished_at: datetime | None = None
     discarded: bool = False
+
+
+class SaveDocumentationRequest(BaseModel):
+    nama_pasien: str = Field(default="")
+    usia_pasien: str = Field(default="")
+    jenis_kelamin: str = Field(default="")
+    nama_dokter: str = Field(default="")
+    keluhan_diagnosa: str = Field(default="")
+    riwayat_alergi: str = Field(default="")
+    obat_lain_penyerta: str = Field(default="")
+    nama_obat_dosis: str = Field(default="")
+    instruksi_khusus: str = Field(default="")
+    edukasi_tindak_lanjut: str = Field(default="")
+    durasi_pengisian_detik: int = Field(default=0, ge=0)
+    waktu_habis: bool = Field(default=False)
+
+
+class SaveDocumentationResponse(BaseModel):
+    id: str
+    session_id: str
+    saved: bool = True

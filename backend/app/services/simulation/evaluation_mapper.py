@@ -20,36 +20,47 @@ def build_initial_trigger_traces(konfigurasi_pemicu: dict[str, Any] | None) -> l
     cfg = konfigurasi_pemicu or {}
     traces: list[TriggerTraceItem] = []
 
-    for item in cfg.get("informasi_kunci") or []:
-        kode = str(item.get("kode") or "").strip()
+    for idx, item in enumerate(cfg.get("informasi_kunci") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        kode = str(item.get("kode") or f"IK-{idx:02d}").strip()
         if kode:
             traces.append(
                 TriggerTraceItem(
                     kode=kode,
                     kategori="informasi_kunci",
                     mode=item.get("mode"),
+                    kutipan_pasien=str(item.get("hal") or item.get("teks") or "").strip() or None,
                 )
             )
 
-    for item in cfg.get("cue") or []:
-        kode = str(item.get("kode") or "").strip()
+    raw_cues = cfg.get("isyarat_emosi") or cfg.get("cue") or []
+    for idx, item in enumerate(raw_cues, start=1):
+        if not isinstance(item, dict):
+            continue
+        kode = str(item.get("kode") or f"CUE-{idx:02d}").strip()
         if kode:
             traces.append(
                 TriggerTraceItem(
                     kode=kode,
                     kategori="cue",
-                    mode=item.get("jenis_atau_sifat"),
+                    mode=item.get("jenis") or item.get("jenis_atau_sifat"),
+                    kutipan_pasien=str(item.get("kalimat") or item.get("teks") or "").strip() or None,
                 )
             )
 
-    for item in cfg.get("probe") or []:
-        kode = str(item.get("kode") or "").strip()
+    raw_probes = cfg.get("probe_bingung") or cfg.get("probe") or []
+    for idx, item in enumerate(raw_probes, start=1):
+        if not isinstance(item, dict):
+            continue
+        kode = str(item.get("kode") or f"PRB-{idx:02d}").strip()
         if kode:
             traces.append(
                 TriggerTraceItem(
                     kode=kode,
                     kategori="probe",
-                    mode=item.get("jenis_atau_sifat"),
+                    mode=item.get("sifat") or item.get("jenis_atau_sifat"),
+                    kutipan_pasien=str(item.get("kalimat") or item.get("teks") or "").strip() or None,
                 )
             )
 
@@ -104,6 +115,59 @@ def update_trigger_traces_from_transcript(
             tr.status_pemicu = "tergali_dan_direspons"
         else:
             tr.status_pemicu = "muncul_belum_direspons"
+
+    # Fallback pencocokan berbasis kata kunci bila kolom pemicu_terkait pada transkrip kosong
+    import re as _re
+
+    def _kw(text: str) -> set[str]:
+        stops = {
+            "yang", "dan", "atau", "dengan", "untuk", "pada", "dari", "saya",
+            "anda", "pasien", "obat", "tidak", "sudah", "belum", "kalau", "jika",
+        }
+        return {t for t in _re.findall(r"[a-zA-Z0-9\u00C0-\u024F]{3,}", text.lower()) if t not in stops}
+
+    for tr in trace_map.values():
+        if tr.sudah_dimunculkan or not tr.kutipan_pasien:
+            continue
+        target_kw = _kw(tr.kutipan_pasien)
+        if not target_kw:
+            continue
+        needed = 1 if len(target_kw) <= 2 else max(2, (len(target_kw) + 1) // 2)
+
+        for row in transcript_rows:
+            row_text = str(row.get("teks") or "")
+            if len(target_kw & _kw(row_text)) >= needed:
+                row_urutan = int(row.get("urutan_global") or 0)
+                tr.sudah_dimunculkan = True
+                tr.giliran_pasien_muncul = row_urutan
+                tr.kode_giliran_pasien = row.get("kode_giliran")
+                tr.kutipan_pasien = row_text
+                if str(row.get("pembicara") or "").lower() == "mahasiswa":
+                    tr.sudah_direspons = True
+                    tr.giliran_mahasiswa_respons = [int(row.get("nomor_giliran_pembicara") or 0)]
+                    if row.get("kode_giliran"):
+                        tr.kode_giliran_mahasiswa = [str(row.get("kode_giliran"))]
+                    tr.kutipan_mahasiswa = [row_text]
+                    tr.status_pemicu = "tergali_dan_direspons"
+                else:
+                    following = [
+                        s for s in student_turns if int(s.get("urutan_global") or 0) > row_urutan
+                    ][:3]
+                    if following:
+                        tr.sudah_direspons = True
+                        tr.giliran_mahasiswa_respons = [
+                            int(s.get("nomor_giliran_pembicara") or 0) for s in following
+                        ]
+                        tr.kode_giliran_mahasiswa = [
+                            str(s.get("kode_giliran") or "") for s in following if s.get("kode_giliran")
+                        ]
+                        tr.kutipan_mahasiswa = [
+                            str(s.get("teks") or "") for s in following if s.get("teks")
+                        ]
+                        tr.status_pemicu = "tergali_dan_direspons"
+                    else:
+                        tr.status_pemicu = "muncul_belum_direspons"
+                break
 
     return list(trace_map.values())
 

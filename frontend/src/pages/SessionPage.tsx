@@ -23,14 +23,19 @@ export default function SessionPage() {
   const [recording, setRecording] = useState(false);
   const [draftText, setDraftText] = useState("");
   const [showForceFinishModal, setShowForceFinishModal] = useState(false);
+  const [showPracticumConfirmModal, setShowPracticumConfirmModal] = useState(false);
   const [pendingMissingItems, setPendingMissingItems] = useState<string[]>([]);
 
   const {
     sessionId,
+    isPracticumBlocked,
+    isResumed,
+    isPageVisible,
     isSessionFinished,
     personaContext,
     messages,
     studentTurnCount,
+    elapsedSec,
     elapsedLabel,
     isStarting,
     isSending,
@@ -40,6 +45,7 @@ export default function SessionPage() {
     error,
     sendMessage,
     finishSession,
+    syncDurationToServer,
   } = useSimulationSession({
     skenarioId: id ?? "",
     mode,
@@ -55,36 +61,66 @@ export default function SessionPage() {
   ].filter(Boolean);
   const subtitle = subtitleParts.join(" · ") || "Simulasi KIE";
 
+  const handleExitSession = () => {
+    if (!isSessionFinished) {
+      void syncDurationToServer(sessionId, elapsedSec, true);
+    }
+    navigate(id ? `/simulasi/${id}?mode=${mode}` : "/simulasi");
+  };
+
   const handleSendText = async (e: FormEvent) => {
     e.preventDefault();
-    if (!draftText.trim() || isSending || isFinishing || isSessionFinished) return;
+    if (!draftText.trim() || isSending || isFinishing || isSessionFinished || isPracticumBlocked) return;
     const textToSend = draftText;
     setDraftText("");
     await sendMessage(textToSend);
   };
 
   const handleFinishClick = async () => {
-    console.log("[FINISH CLICK]", { sessionId, mode, isFinishing, isSending });
+    if (mode === "praktikum") {
+      setShowPracticumConfirmModal(true);
+      return;
+    }
+
     const res = await finishSession({
       forceFinish: false,
       discardOnForceFinish: false,
     });
-    console.log("[FINISH RESPONSE]", res);
     if (!res) return;
 
     if (res.canFinish && sessionId) {
-      navigate(`/rapor?sesi=${encodeURIComponent(sessionId)}`, { replace: true });
+      navigate(`/dokumentasi?sesi=${encodeURIComponent(sessionId)}`, { replace: true });
       return;
     }
 
     if (!res.canFinish && mode === "mandiri") {
       setPendingMissingItems(res.missingItems ?? []);
       setShowForceFinishModal(true);
-    } else {
-      console.warn("[MODAL NOT OPENED]", {
-        canFinish: res.canFinish,
-        mode,
-      });
+    }
+  };
+
+  const handleConfirmFinishPracticum = async () => {
+    const res = await finishSession({
+      forceFinish: true,
+      discardOnForceFinish: false,
+    });
+    if (res?.canFinish && sessionId) {
+      setShowPracticumConfirmModal(false);
+      navigate(`/dokumentasi?sesi=${encodeURIComponent(sessionId)}`, { replace: true });
+    }
+  };
+
+  const handleConfirmSaveAndFinish = async () => {
+    const res = await finishSession({
+      forceFinish: true,
+      discardOnForceFinish: false,
+    });
+    if (res?.canFinish) {
+      setShowForceFinishModal(false);
+      navigate(
+        sessionId ? `/dokumentasi?sesi=${encodeURIComponent(sessionId)}` : "/riwayat",
+        { replace: true },
+      );
     }
   };
 
@@ -99,17 +135,18 @@ export default function SessionPage() {
     }
   };
 
+  // Konservasi hint: mode praktikum hanya menampilkan kategori umum tanpa bocoran pemicu spesifik
   const finishHint = isSessionFinished
     ? "Sesi telah berakhir. Pasien sudah pamit dan sesi diarahkan ke evaluasi."
     : isFinishing
       ? "Memeriksa kelengkapan pemicu & rencana tindak lanjut..."
-      : finishResult && !finishResult.canFinish && finishResult.missingItems.length > 0
-        ? `Belum terpenuhi: ${finishResult.missingItems.join(" • ")}`
-        : mode === "mandiri"
-          ? "Syarat belum lengkap. Menekan Selesaikan Sesi pada mode mandiri akan membuka konfirmasi penghapusan sesi."
-          : studentTurnCount < 1
-            ? "Lakukan minimal 1 giliran percakapan sebelum menyelesaikan sesi."
-            : "Sesi dapat diakhiri setelah seluruh pemicu tergali dan rencana tindak lanjut disampaikan.";
+      : mode === "praktikum"
+        ? studentTurnCount < 1
+          ? "Lakukan minimal 1 giliran percakapan sebelum menyelesaikan sesi praktikum."
+          : "Tekan Selesaikan Sesi jika konseling telah selesai untuk melanjutkan ke dokumentasi kefarmasian."
+        : finishResult && !finishResult.canFinish && finishResult.missingItems.length > 0
+          ? `Belum terpenuhi: ${finishResult.missingItems.join(" • ")}`
+          : "Mode mandiri: jika syarat belum lengkap, menekan Selesaikan Sesi akan membuka opsi konfirmasi pengakhiran/penghapusan sesi.";
 
   return (
     <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 lg:h-[calc(100vh-7rem)]">
@@ -118,8 +155,18 @@ export default function SessionPage() {
         modeLabel={mode.toUpperCase()}
         elapsed={elapsedLabel}
         limit="10:00"
-        onExit={() => navigate(id ? `/simulasi/${id}?mode=${mode}` : "/simulasi")}
+        onExit={handleExitSession}
       />
+
+      {isResumed && !isSessionFinished && (
+        <div
+          role="status"
+          className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-xs font-medium text-sky-900"
+        >
+          Sesi dilanjutkan otomatis dari durasi terakhir ({elapsedLabel})
+          {!isPageVisible ? " — timer dijeda karena tab tidak aktif." : "."}
+        </div>
+      )}
 
       {error && (
         <div
@@ -135,7 +182,7 @@ export default function SessionPage() {
           role="status"
           className="rounded-xl border border-lime-300 bg-lime-50 px-4 py-2.5 text-xs font-semibold text-lime-900"
         >
-          Seluruh pemicu dan rencana tindak lanjut terpenuhi. Sesi ditutup dengan status evaluasi:{" "}
+          Sesi telah diakhiri dengan status evaluasi:{" "}
           <span className="uppercase">{finishResult.evaluationStatus}</span>.
         </div>
       )}
@@ -178,19 +225,21 @@ export default function SessionPage() {
               type="text"
               value={draftText}
               onChange={(e) => setDraftText(e.target.value)}
-              disabled={isSending || isFinishing || isSessionFinished}
+              disabled={isSending || isFinishing || isSessionFinished || isPracticumBlocked}
               placeholder={
-                isSessionFinished
-                  ? "Sesi percakapan telah selesai."
-                  : isStarting
-                    ? "Ketik tanggapan apoteker di sini (menghubungkan sesi...)"
-                    : "Ketik tanggapan apoteker di sini..."
+                isPracticumBlocked
+                  ? "Percobaan praktikum untuk skenario ini sudah selesai."
+                  : isSessionFinished
+                    ? "Sesi percakapan telah selesai."
+                    : isStarting
+                      ? "Ketik tanggapan apoteker di sini (menghubungkan sesi...)"
+                      : "Ketik tanggapan apoteker di sini..."
               }
               className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted/60 disabled:opacity-50"
             />
             <button
               type="submit"
-              disabled={!draftText.trim() || isSending || isFinishing || isSessionFinished}
+              disabled={!draftText.trim() || isSending || isFinishing || isSessionFinished || isPracticumBlocked}
               className="inline-flex items-center gap-1.5 rounded-xl bg-navy-900 px-4 py-2 text-xs font-bold text-white transition hover:bg-navy-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Send size={14} /> Kirim
@@ -205,6 +254,7 @@ export default function SessionPage() {
         canFinish={canFinishSession}
         mode={mode}
         isFinishing={isFinishing}
+        isSessionFinished={isSessionFinished || isPracticumBlocked}
         finishHint={finishHint}
         onToggleRecord={() => setRecording((r) => !r)}
         onCancelRecord={() => setRecording(false)}
@@ -214,10 +264,52 @@ export default function SessionPage() {
       <ForceFinishModal
         open={showForceFinishModal}
         isSubmitting={isFinishing}
+        studentTurnCount={studentTurnCount}
         missingItems={pendingMissingItems}
         onCancel={() => setShowForceFinishModal(false)}
+        onConfirmSaveAndFinish={handleConfirmSaveAndFinish}
         onConfirmDiscardAndFinish={handleConfirmDiscardAndFinish}
       />
+
+      {showPracticumConfirmModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="practicum-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-navy-900/40 p-4 backdrop-blur-[1px]"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-line bg-white p-6 shadow-xl">
+            <h2
+              id="practicum-confirm-title"
+              className="font-serif text-lg font-bold text-navy-900"
+            >
+              Akhiri Sesi Praktikum?
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-muted">
+              Setelah diakhiri, percakapan tidak dapat dilanjutkan kembali dan Anda akan
+              langsung diarahkan ke halaman pengisian dokumentasi kefarmasian.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={isFinishing}
+                onClick={() => setShowPracticumConfirmModal(false)}
+                className="rounded-xl border border-line bg-cream px-4 py-2 text-xs font-semibold text-navy-900 hover:bg-sky-50 disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isFinishing}
+                onClick={handleConfirmFinishPracticum}
+                className="rounded-xl bg-navy-900 px-4 py-2 text-xs font-bold text-white hover:bg-navy-800 disabled:opacity-50"
+              >
+                {isFinishing ? "Memproses..." : "Ya, Akhiri & Lanjut Dokumentasi"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,9 +1,42 @@
+import logging
 import re
+from collections.abc import Sequence
 from google import genai
 from google.genai import types
 
 from app.core.config import settings
 from app.models.schemas import PatientPersonaContext, TurnHistoryItem
+
+logger = logging.getLogger(__name__)
+
+# Daftar semua model Gemini Flash untuk generasi jawaban teks (non-image)
+FLASH_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
+
+_FALLBACK_STATUS_CODES: frozenset[int] = frozenset({404, 429, 503, 504})
+_FALLBACK_ERROR_MARKERS: tuple[str, ...] = (
+    "429",
+    "503",
+    "504",
+    "404",
+    "RESOURCE_EXHAUSTED",
+    "TOO MANY REQUESTS",
+    "RATE_LIMIT",
+    "RATE LIMIT",
+    "QUOTA",
+    "UNAVAILABLE",
+    "OVERLOADED",
+    "NOT_FOUND",
+    "NOT FOUND",
+)
 
 
 def _format_patient_facts(ctx: PatientPersonaContext) -> str:
@@ -155,19 +188,54 @@ def _map_history_to_contents(
     return contents
 
 
-def _build_config(system_instruction: str, max_tokens: int = 768) -> types.GenerateContentConfig:
+def _build_config(
+    system_instruction: str,
+    max_tokens: int = 768,
+    *,
+    include_thinking: bool = True,
+) -> types.GenerateContentConfig:
     kwargs: dict[str, object] = {
         "system_instruction": system_instruction,
         "temperature": 0.7,
         "max_output_tokens": max_tokens,
     }
-    thinking_cls = getattr(types, "ThinkingConfig", None)
-    if thinking_cls is not None:
-        try:
-            kwargs["thinking_config"] = thinking_cls(thinking_budget=128)
-        except TypeError:
-            pass
+    if include_thinking:
+        thinking_cls = getattr(types, "ThinkingConfig", None)
+        if thinking_cls is not None:
+            try:
+                kwargs["thinking_config"] = thinking_cls(thinking_budget=128)
+            except TypeError:
+                pass
     return types.GenerateContentConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def _should_fallback_model(exc: Exception) -> bool:
+    for attr in ("code", "status_code"):
+        code = getattr(exc, attr, None)
+        if isinstance(code, int) and code in _FALLBACK_STATUS_CODES:
+            return True
+
+    status_text = str(getattr(exc, "status", "") or "").upper()
+    message_text = str(exc).upper()
+    combined = f"{status_text} {message_text}"
+    return any(marker in combined for marker in _FALLBACK_ERROR_MARKERS)
+
+
+def _is_thinking_config_error(exc: Exception) -> bool:
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    message_text = str(exc).lower()
+    return (code == 400 or "invalid_argument" in message_text) and "thinking" in message_text
+
+
+def _dedupe_models(primary: str, candidates: Sequence[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in (primary, *candidates):
+        cleaned = (name or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            ordered.append(cleaned)
+    return ordered
 
 
 def _is_truncated_reply(text: str, finish_reason: object) -> bool:
@@ -182,9 +250,82 @@ def _is_truncated_reply(text: str, finish_reason: object) -> bool:
 
 
 class GeminiPatientService:
-    def __init__(self, model_name: str | None = None) -> None:
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    def __init__(
+        self,
+        model_name: str | None = None,
+        fallback_models: Sequence[str] | None = None,
+    ) -> None:
+        http_options = (
+            types.HttpOptions(api_version="v1beta")
+            if hasattr(types, "HttpOptions")
+            else None
+        )
+        client_kwargs: dict[str, object] = {"api_key": settings.GEMINI_API_KEY}
+        if http_options is not None:
+            client_kwargs["http_options"] = http_options
+        self.client = genai.Client(**client_kwargs)  # type: ignore[arg-type]
         self.model_name = model_name or getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+        base_fallbacks = fallback_models if fallback_models is not None else FLASH_FALLBACK_MODELS
+        self.fallback_models = _dedupe_models(self.model_name, base_fallbacks)
+
+    def _ordered_models(self, start_model: str | None = None) -> list[str]:
+        if start_model:
+            return _dedupe_models(start_model, self.fallback_models)
+        return list(self.fallback_models)
+
+    async def _generate_content_with_fallback(
+        self,
+        *,
+        contents: list[types.Content],
+        system_instruction: str,
+        max_tokens: int,
+        start_model: str | None = None,
+    ) -> tuple[object, str]:
+        models_to_try = self._ordered_models(start_model)
+        last_error: Exception | None = None
+
+        for idx, candidate_model in enumerate(models_to_try):
+            config = _build_config(system_instruction, max_tokens=max_tokens, include_thinking=True)
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=candidate_model,
+                    contents=contents,
+                    config=config,
+                )
+                return response, candidate_model
+            except Exception as exc:
+                if _is_thinking_config_error(exc):
+                    try:
+                        retry_config = _build_config(
+                            system_instruction,
+                            max_tokens=max_tokens,
+                            include_thinking=False,
+                        )
+                        response = await self.client.aio.models.generate_content(
+                            model=candidate_model,
+                            contents=contents,
+                            config=retry_config,
+                        )
+                        return response, candidate_model
+                    except Exception as retry_exc:
+                        exc = retry_exc
+
+                if _should_fallback_model(exc):
+                    last_error = exc
+                    next_model = models_to_try[idx + 1] if idx + 1 < len(models_to_try) else None
+                    logger.warning(
+                        "Model Gemini '%s' gagal (%s). %s",
+                        candidate_model,
+                        exc,
+                        f"Pindah ke model '{next_model}'." if next_model else "Tidak ada model cadangan tersisa.",
+                    )
+                    continue
+
+                raise
+
+        raise RuntimeError(
+            f"Semua model Gemini Flash gagal atau tidak tersedia ({', '.join(models_to_try)}): {last_error}"
+        ) from last_error
 
     async def generate_reply(
         self,
@@ -195,15 +336,14 @@ class GeminiPatientService:
     ) -> str:
         system_instruction = build_patient_system_prompt(persona_context)
         contents = _map_history_to_contents(history, student_message)
-        config = _build_config(system_instruction, max_tokens=768)
 
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
+        response, used_model = await self._generate_content_with_fallback(
             contents=contents,
-            config=config,
+            system_instruction=system_instruction,
+            max_tokens=768,
         )
 
-        reply = (response.text or "").strip()
+        reply = (getattr(response, "text", None) or "").strip()
         finish_reason = None
         candidates = getattr(response, "candidates", None) or []
         if candidates:
@@ -215,12 +355,13 @@ class GeminiPatientService:
                 "(Catatan sistem: berikan jawaban lengkap dalam 2-4 kalimat wajar sesuai karakter dan akhiri dengan tanda baca penuh.)"
             )
             retry_contents = _map_history_to_contents(history, retry_prompt)
-            retry_response = await self.client.aio.models.generate_content(
-                model=self.model_name,
+            retry_response, _ = await self._generate_content_with_fallback(
                 contents=retry_contents,
-                config=_build_config(system_instruction, max_tokens=896),
+                system_instruction=system_instruction,
+                max_tokens=896,
+                start_model=used_model,
             )
-            retry_reply = (retry_response.text or "").strip()
+            retry_reply = (getattr(retry_response, "text", None) or "").strip()
             if retry_reply and (
                 not reply
                 or len(retry_reply) > len(reply)

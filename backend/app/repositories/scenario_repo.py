@@ -1,8 +1,10 @@
 import asyncio
 from datetime import datetime, timezone
+import logging
 from typing import Any
 import uuid
-from venv import logger
+
+logger = logging.getLogger(__name__)
 
 
 class SupabaseSimulationRepository:
@@ -37,7 +39,10 @@ class SupabaseSimulationRepository:
     def _fetch_transcript_sync(self, session_id: str) -> list[dict[str, Any]]:
         res = (
             self.db.table("transkrip_dialog")
-            .select("id, urutan_global, kode_giliran, nomor_giliran_pembicara, pembicara, teks")
+            .select(
+                "id, id_sesi, urutan_global, kode_giliran, nomor_giliran_pembicara, "
+                "pembicara, waktu_mulai_detik, teks, pemicu_terkait, status_asr_valid, created_at"
+            )
             .eq("id_sesi", session_id)
             .order("urutan_global", desc=False)
             .execute()
@@ -59,6 +64,19 @@ class SupabaseSimulationRepository:
         inserted = res.data or []
         if len(inserted) < 2:
             raise RuntimeError("Gagal menyimpan giliran percakapan ke transkrip_dialog.")
+
+        # Sinkronkan jumlah giliran mahasiswa secara real-time di sesi_simulasi
+        try:
+            mhs_num = int(student_row.get("nomor_giliran_pembicara") or 0)
+            if mhs_num > 0:
+                valid_flag = student_row.get("status_asr_valid", True) is not False
+                update_fields: dict[str, Any] = {"jumlah_giliran_mahasiswa": mhs_num}
+                if valid_flag:
+                    update_fields["jumlah_giliran_valid"] = mhs_num
+                self.db.table("sesi_simulasi").update(update_fields).eq("id", session_id).execute()
+        except Exception as exc:
+            logger.debug("Sinkronisasi jumlah giliran pada sesi_simulasi dilewati: %s", exc)
+
         return inserted[0], inserted[1]
 
     async def get_scenario_for_simulation(
@@ -84,6 +102,101 @@ class SupabaseSimulationRepository:
             session_id=session_id,
             student_row=student_row,
             patient_row=patient_row,
+        )
+
+    def _get_active_session_sync(
+        self,
+        *,
+        id_mahasiswa: str,
+        id_skenario: str,
+        mode: str,
+    ) -> dict[str, Any] | None:
+        res = (
+            self.db.table("sesi_simulasi")
+            .select("*")
+            .eq("id_mahasiswa", id_mahasiswa)
+            .eq("id_skenario", id_skenario)
+            .eq("mode", mode)
+            .eq("status_evaluasi", "berjalan")
+            .order("waktu_mulai", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    async def get_active_session(
+        self,
+        *,
+        id_mahasiswa: str,
+        id_skenario: str,
+        mode: str,
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(
+            self._get_active_session_sync,
+            id_mahasiswa=id_mahasiswa,
+            id_skenario=id_skenario,
+            mode=mode,
+        )
+
+    def _has_completed_practicum_attempt_sync(
+        self,
+        *,
+        id_mahasiswa: str,
+        id_skenario: str,
+    ) -> bool:
+        blocking_statuses = ["selesai_otomatis", "perlu_ditinjau_dosen", "selesai_ditinjau"]
+        res = (
+            self.db.table("sesi_simulasi")
+            .select("id, status_evaluasi")
+            .eq("id_mahasiswa", id_mahasiswa)
+            .eq("id_skenario", id_skenario)
+            .eq("mode", "praktikum")
+            .in_("status_evaluasi", blocking_statuses)
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+
+    async def has_completed_practicum_attempt(
+        self,
+        *,
+        id_mahasiswa: str,
+        id_skenario: str,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._has_completed_practicum_attempt_sync,
+            id_mahasiswa=id_mahasiswa,
+            id_skenario=id_skenario,
+        )
+
+    def _update_active_duration_sync(
+        self,
+        *,
+        session_id: str,
+        durasi_aktif_detik: int,
+    ) -> None:
+        safe_duration = max(0, int(durasi_aktif_detik))
+        try:
+            self.db.table("sesi_simulasi").update(
+                {"durasi_aktif_detik": safe_duration}
+            ).eq("id", session_id).eq("status_evaluasi", "berjalan").execute()
+        except Exception as exc:
+            logger.debug(
+                "update_active_duration dilewati (cek kolom durasi_aktif_detik): %s",
+                exc,
+            )
+
+    async def update_active_duration(
+        self,
+        *,
+        session_id: str,
+        durasi_aktif_detik: int,
+    ) -> None:
+        await asyncio.to_thread(
+            self._update_active_duration_sync,
+            session_id=session_id,
+            durasi_aktif_detik=durasi_aktif_detik,
         )
 
     def _create_session_with_opening_sync(
@@ -182,8 +295,10 @@ class SupabaseSimulationRepository:
             .select(
                 "id, kode_sesi, id_skenario, id_mahasiswa, mode, "
                 "jumlah_giliran_mahasiswa, jumlah_giliran_valid, "
+                "persentase_audio_valid, jumlah_segmen_vokal_valid, "
                 "semua_pemicu_tergali, status_evaluasi, perlu_ditinjau_dosen, "
-                "alasan_tinjau_dosen, penanda_khusus, waktu_mulai, waktu_selesai"
+                "alasan_tinjau_dosen, penanda_khusus, waktu_mulai, waktu_selesai, "
+                "durasi_aktif_detik"
             )
             .eq("id", session_id)
             .limit(1)
@@ -226,6 +341,7 @@ class SupabaseSimulationRepository:
         allowed_columns = {
             "status_evaluasi",
             "waktu_selesai",
+            "durasi_aktif_detik",
             "jumlah_giliran_mahasiswa",
             "jumlah_giliran_valid",
             "semua_pemicu_tergali",
@@ -239,6 +355,7 @@ class SupabaseSimulationRepository:
         payload: dict[str, Any] = {
             "status_evaluasi": status_evaluasi,
             "waktu_selesai": datetime.now(timezone.utc).isoformat(),
+            "durasi_aktif_detik": max(0, int(durasi_detik)),
         }
         if extra_session_updates:
             for key, val in extra_session_updates.items():
@@ -253,6 +370,7 @@ class SupabaseSimulationRepository:
         )
         rows = res.data or []
         return rows[0] if rows else {"id": session_id, **payload}
+
     async def mark_session_finished(
         self,
         *,
@@ -270,7 +388,7 @@ class SupabaseSimulationRepository:
             farewell_row=farewell_row,
             extra_session_updates=extra_session_updates,
         )
-    
+
     def _discard_session_and_transcript_sync(self, session_id: str) -> bool:
         self.db.table("transkrip_dialog").delete().eq("id_sesi", session_id).execute()
         res = self.db.table("sesi_simulasi").delete().eq("id", session_id).execute()
@@ -284,3 +402,48 @@ class SupabaseSimulationRepository:
 
     async def discard_session_and_transcript(self, session_id: str) -> bool:
         return await asyncio.to_thread(self._discard_session_and_transcript_sync, session_id)
+
+    def _save_documentation_sync(
+        self,
+        *,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "id_sesi": session_id,
+            **payload,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        res = (
+            self.db.table("dokumentasi_konseling")
+            .upsert(record, on_conflict="id_sesi")
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def save_documentation(
+        self,
+        *,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._save_documentation_sync,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def _get_documentation_sync(self, session_id: str) -> dict[str, Any] | None:
+        res = (
+            self.db.table("dokumentasi_konseling")
+            .select("*")
+            .eq("id_sesi", session_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    async def get_documentation(self, session_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_documentation_sync, session_id)

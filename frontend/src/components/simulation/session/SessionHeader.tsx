@@ -1,41 +1,35 @@
-import { ArrowLeft, Focus, Timer } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { ArrowLeft, Timer } from "lucide-react";
 
 interface Props {
   title: string;
-  modeLabel: string;      // "PRAKTIKUM" | "MANDIRI"
-  elapsed: string;        // "02:41"
-  limit?: string;         // "10:00"
+  modeLabel: string; // "PRAKTIKUM" | "MANDIRI"
+  elapsed: string; // "02:41"
+  limit?: string; // "10:00"
   onExit?: () => void;
 }
 
 export function SessionHeader({ title, modeLabel, elapsed, limit, onExit }: Props) {
   return (
-    <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-white px-5 py-3 shadow-sm">
-      <div className="flex min-w-0 flex-wrap items-center gap-4">
+    <header className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-white px-5 py-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-3">
         <button
-          type="button" onClick={onExit}
-          className="inline-flex items-center gap-2 whitespace-nowrap text-sm font-semibold text-navy-900 hover:underline"
+          type="button"
+          onClick={onExit}
+          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1 text-sm font-medium text-muted transition hover:bg-slate-100 hover:text-ink"
         >
-          <ArrowLeft size={16} /> Keluar Sesi
+          <ArrowLeft size={15} /> Keluar
         </button>
-        <span className="hidden h-6 w-px bg-line sm:block" />
-        <h1 className="truncate font-serif text-lg font-bold">{title}</h1>
-        <span className="rounded-full bg-navy-900 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-gold-400">
-          {modeLabel}
+        <span className="hidden h-5 w-px bg-line sm:block" />
+        <h1 className="truncate text-base font-semibold text-ink">{title}</h1>
+        <span className="rounded-md bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-navy-900">
+          {modeLabel === "PRAKTIKUM" ? "Praktikum" : "Mandiri"}
         </span>
       </div>
 
-      <div className="flex items-center gap-3">
-        <span className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl border border-line bg-cream px-4 py-2 font-mono text-sm">
-          <Timer size={15} className="text-amber-600" />
-          <b>{elapsed}</b>
-          {limit && <span className="text-muted">/ {limit}</span>}
-        </span>
-        <span className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl border border-line bg-cream px-3 py-2 text-xs font-semibold">
-          <span className="h-2 w-2 rounded-full bg-lime-600" />
-          <Focus size={13} className="hidden sm:block" /> Mode Fokus Aktif
-        </span>
+      <div className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-line bg-slate-50 px-3.5 py-1.5 text-sm tabular-nums">
+        <Timer size={14} className="text-muted" />
+        <span className="font-semibold text-ink">{elapsed}</span>
+        {limit && <span className="text-xs text-muted">/ {limit}</span>}
       </div>
     </header>
   );

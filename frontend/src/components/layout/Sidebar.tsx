@@ -1,20 +1,23 @@
 import { useEffect } from "react";
 import { NavLink, useLocation } from "react-router";
-import { 
-  LayoutDashboard, 
-  History, 
-  Settings,
-  BookOpenCheck,
+import { useQuery } from "@tanstack/react-query";
+import {
   BarChart3,
-  Library,
-  Users,
-  Database,
+  BookOpenCheck,
   CalendarClock,
-  type LucideIcon 
+  Database,
+  FolderOpen,
+  History,
+  LayoutDashboard,
+  Library,
+  Settings,
+  Users,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/store/uiStore";
 import { useAuthStore } from "@/store/authStore";
+import { fetchDosenReviewQueueApi } from "@/api/antrean";
 import type { Role } from "@/types/auth";
 
 interface NavItem {
@@ -29,60 +32,61 @@ interface NavGroup {
   items: NavItem[];
 }
 
-// Konfigurasi dinamis berdasarkan role pengguna
 const navByRole: Record<Role, NavGroup[]> = {
   mahasiswa: [
     {
-      heading: "Praktikum & Simulasi",
+      heading: "SIMULASI",
       items: [
-        { to: "/", label: "Dashboard Mahasiswa", icon: LayoutDashboard, end: true },
+        { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
+        { to: "/simulasi", label: "Katalog Kasus", icon: FolderOpen },
         { to: "/riwayat", label: "Riwayat Simulasi", icon: History },
       ],
     },
     {
-      heading: "Akun & Preferensi",
-      items: [
-        { to: "/pengaturan", label: "Pengaturan Akun", icon: Settings },
-      ],
+      heading: "AKUN",
+      items: [{ to: "/pengaturan", label: "Pengaturan", icon: Settings }],
     },
   ],
   dosen: [
     {
-      heading: "Panel Dosen Penguji",
+      heading: "Pengajaran",
       items: [
         { to: "/dosen", label: "Dashboard Dosen", icon: LayoutDashboard, end: true },
-        { to: "/dosen/tinjauan", label: "Antrean & Tinjauan", icon: BookOpenCheck },
-        { to: "/dosen/kelas", label: "Rekap Kelas & Analitik", icon: BarChart3 },
-        { to: "/dosen/kasus", label: "Bank Kasus & Studio Skenario", icon: Library },
+        { to: "/dosen/antrean", label: "Antrean Tinjauan", icon: BookOpenCheck },
+        { to: "/dosen/rekap", label: "Rekap Kelas", icon: BarChart3 },
+        { to: "/dosen/kasus", label: "Bank Kasus", icon: Library },
         { to: "/dosen/penugasan", label: "Penugasan Praktikum", icon: CalendarClock },
       ],
     },
     {
-      heading: "Pengaturan",
-      items: [
-        { to: "/dosen/pengaturan", label: "Pengaturan Akun", icon: Settings },
-      ],
+      heading: "Akun",
+      items: [{ to: "/dosen/pengaturan", label: "Pengaturan", icon: Settings }],
     },
   ],
   admin: [
     {
-      heading: "Administrasi Sistem",
+      heading: "Administrasi",
       items: [
         { to: "/admin", label: "Dashboard Admin", icon: LayoutDashboard, end: true },
-        { to: "/admin/pengguna", label: "Registrasi Pengguna", icon: Users },
+        { to: "/admin/pengguna", label: "Manajemen Pengguna", icon: Users },
         { to: "/admin/database", label: "Database Master", icon: Database },
       ],
     },
     {
-      heading: "Pengaturan",
-      items: [
-        { to: "/admin/pengaturan", label: "Pengaturan Akun", icon: Settings },
-      ],
+      heading: "Akun",
+      items: [{ to: "/admin/pengaturan", label: "Pengaturan", icon: Settings }],
     },
   ],
 };
 
-function Item({ to, label, icon: Icon, end, collapsed }: NavItem & { collapsed: boolean }) {
+function Item({
+  to,
+  label,
+  icon: Icon,
+  end,
+  collapsed,
+  badgeCount,
+}: NavItem & { collapsed: boolean; badgeCount?: number }) {
   return (
     <NavLink
       to={to}
@@ -90,14 +94,34 @@ function Item({ to, label, icon: Icon, end, collapsed }: NavItem & { collapsed: 
       title={collapsed ? label : undefined}
       className={({ isActive }) =>
         cn(
-          "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium",
+          "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition",
           collapsed && "lg:justify-center lg:px-0",
-          isActive ? "bg-navy-900 text-white" : "text-ink hover:bg-black/5",
+          isActive
+            ? "bg-navy-900 font-semibold text-white"
+            : "font-medium text-muted hover:bg-slate-100 hover:text-ink",
         )
       }
     >
-      <Icon size={18} className="shrink-0" />
-      <span className={cn("truncate", collapsed && "lg:hidden")}>{label}</span>
+      {({ isActive }) => (
+        <>
+          <Icon
+            size={17}
+            className={cn("shrink-0", isActive ? "text-gold-400" : "text-muted")}
+          />
+          <span className={cn("flex-1 truncate", collapsed && "lg:hidden")}>{label}</span>
+          {typeof badgeCount === "number" && badgeCount > 0 && (
+            <span
+              className={cn(
+                "grid h-5 min-w-5 place-items-center rounded-full px-1.5 text-[11px] font-bold tabular-nums",
+                isActive ? "bg-gold-400 text-navy-900" : "bg-gold-100 text-amber-900",
+                collapsed && "lg:hidden",
+              )}
+            >
+              {badgeCount}
+            </span>
+          )}
+        </>
+      )}
     </NavLink>
   );
 }
@@ -106,14 +130,24 @@ export function Sidebar() {
   const { collapsed, mobileOpen, setMobileOpen } = useUiStore();
   const { pathname } = useLocation();
   const profile = useAuthStore((s) => s.profile);
-  
+
   const role = profile?.peran || "mahasiswa";
   const navGroups = navByRole[role];
 
-  // Tutup drawer saat pindah halaman
+  const qAntreanCount = useQuery({
+    queryKey: ["dosen", "antrean", "badge", profile?.id ?? "", profile?.auth_user_id ?? ""],
+    queryFn: () =>
+      fetchDosenReviewQueueApi({
+        idDosen: profile!.id,
+        authUserId: profile?.auth_user_id,
+      }),
+    enabled: role === "dosen" && Boolean(profile?.id),
+    staleTime: 30_000,
+  });
+  const pendingReviewCount = qAntreanCount.data?.total_antrean ?? 0;
+
   useEffect(() => setMobileOpen(false), [pathname, setMobileOpen]);
 
-  // Tutup drawer dengan tombol Esc
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMobileOpen(false);
     window.addEventListener("keydown", onKey);
@@ -121,16 +155,15 @@ export function Sidebar() {
   }, [setMobileOpen]);
 
   const headingClass = cn(
-    "px-3 pb-2 text-[10px] font-semibold uppercase tracking-widest text-muted",
+    "px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/80",
     collapsed && "lg:hidden",
   );
 
   return (
     <>
-      {/* Backdrop (mobile saja) */}
       {mobileOpen && (
         <div
-          className="fixed inset-0 top-16 z-30 bg-black/40 lg:hidden"
+          className="fixed inset-0 top-16 z-30 bg-slate-900/25 lg:hidden"
           onClick={() => setMobileOpen(false)}
           aria-hidden
         />
@@ -138,40 +171,44 @@ export function Sidebar() {
 
       <aside
         className={cn(
-          "flex w-60 shrink-0 flex-col justify-between border-r border-line bg-white",
-          "transition-all duration-200",
-          // mobile: drawer
+          "flex w-60 shrink-0 flex-col justify-between border-r border-line bg-white transition-all duration-200",
           "fixed bottom-0 left-0 top-16 z-40",
           mobileOpen ? "translate-x-0" : "-translate-x-full",
-          // desktop: menempel di bawah topbar, tinggi penuh layar
           "lg:sticky lg:bottom-auto lg:h-[calc(100vh-4rem)] lg:translate-x-0 lg:self-start",
           collapsed ? "lg:w-16" : "lg:w-60",
         )}
       >
-        <div className="overflow-y-auto overflow-x-hidden p-2">
+        <div className="overflow-y-auto overflow-x-hidden p-3">
           {navGroups.map((group, index) => (
-            <div key={group.heading} className={cn(index > 0 && "mt-4 border-t border-line pt-4")}>
+            <div key={group.heading} className={cn(index > 0 && "mt-5 border-t border-line pt-4")}>
               <p className={headingClass}>{group.heading}</p>
-              <nav className="mt-1 space-y-1">
+              <nav className="mt-1 space-y-0.5">
                 {group.items.map((item) => (
-                  <Item key={item.to} {...item} collapsed={collapsed} />
+                  <Item
+                    key={item.to}
+                    {...item}
+                    collapsed={collapsed}
+                    badgeCount={item.to === "/dosen/antrean" ? pendingReviewCount : undefined}
+                  />
                 ))}
               </nav>
             </div>
           ))}
         </div>
 
-        <div className="border-t border-line p-4 text-xs">
+        <div className="border-t border-line px-4 py-3.5 text-xs text-muted">
           <div
-            className={cn("flex items-center gap-2 text-ink", collapsed && "lg:justify-center")}
-            title={collapsed ? "Server KIE Aktif" : undefined}
+            className={cn("flex items-center gap-2", collapsed && "lg:justify-center")}
+            title={collapsed ? "Server Aktif" : undefined}
           >
-            <span className="h-2 w-2 shrink-0 rounded-full bg-lime-500" />
-            <span className={cn(collapsed && "lg:hidden")}>Server KIE Aktif</span>
+            <span className="h-2 w-2 shrink-0 rounded-full bg-olive-600" />
+            <span className={cn("font-medium text-ink", collapsed && "lg:hidden")}>
+              Server Aktif
+            </span>
           </div>
-          <div className={cn("mt-1 font-serif text-[11px] text-muted", collapsed && "lg:hidden")}>
-            v2.4.1-rc • Unpad Farmasi
-          </div>
+          <p className={cn("mt-0.5 text-[11px] text-muted", collapsed && "lg:hidden")}>
+            VIKIE • Farmasi Unpad
+          </p>
         </div>
       </aside>
     </>

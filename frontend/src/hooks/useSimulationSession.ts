@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   finishSimulationApi,
+  pauseSimulationDurationApi,
   sendSimulationTurnApi,
   startSimulationApi,
   type FinishSimulationApiResponse,
+  type ResumedTranscriptItem,
   type TurnHistoryPayload,
 } from "@/api/simulation";
 import type { Msg } from "@/components/simulation/session/TranscriptPanel";
@@ -34,8 +36,9 @@ function isValidUuid(value: string | null | undefined): value is string {
 }
 
 function normalizeEvaluationStatus(raw?: string): EvaluationStatusEnum {
-  if (raw && (VALID_STATUSES as string[]).includes(raw)) {
-    return raw as EvaluationStatusEnum;
+  const cleaned = raw?.trim().replace(/_/g, " ");
+  if (cleaned && (VALID_STATUSES as string[]).includes(cleaned)) {
+    return cleaned as EvaluationStatusEnum;
   }
   if (raw === "menunggu_evaluasi" || raw === "selesai") {
     return "selesai otomatis";
@@ -60,6 +63,11 @@ export function useSimulationSession({
 }: UseSimulationSessionParams) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isLocalMode, setIsLocalMode] = useState(false);
+  const [isPracticumBlocked, setIsPracticumBlocked] = useState(false);
+  const [isResumed, setIsResumed] = useState(false);
+  const [isPageVisible, setIsPageVisible] = useState<boolean>(() =>
+    typeof document === "undefined" ? true : document.visibilityState === "visible",
+  );
   const [evaluationStatus, setEvaluationStatus] = useState<EvaluationStatusEnum>("berjalan");
   const [personaContext, setPersonaContext] = useState<PatientPersonaContext | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -72,15 +80,69 @@ export function useSimulationSession({
   const [error, setError] = useState<string | null>(null);
 
   const startedKeyRef = useRef<string | null>(null);
+  const elapsedRef = useRef(0);
+  const sessionIdRef = useRef<string | null>(null);
+  const statusRef = useRef<EvaluationStatusEnum>("berjalan");
 
-  // Timer sesi berjalan selama status "berjalan"
+  elapsedRef.current = elapsedSec;
+  sessionIdRef.current = sessionId;
+  statusRef.current = evaluationStatus;
+
+  const syncDurationToServer = useCallback(
+    async (targetSid: string | null, sec: number, useKeepalive = false) => {
+      if (!targetSid || !isValidUuid(targetSid) || statusRef.current !== "berjalan") return;
+      try {
+        await pauseSimulationDurationApi({
+          sessionId: targetSid,
+          durasiDetik: sec,
+          keepalive: useKeepalive,
+        });
+      } catch {
+        // Abaikan kegagalan jaringan saat tab ditutup/unmount
+      }
+    },
+    [],
+  );
+
+  // Pantau visibilitas tab/jendela dan sinkronkan durasi saat keluar/sembunyi
   useEffect(() => {
-    if (!sessionId || evaluationStatus !== "berjalan") return;
+    const handleVisibilityChange = () => {
+      const visible = document.visibilityState === "visible";
+      setIsPageVisible(visible);
+      if (!visible && isValidUuid(sessionIdRef.current) && statusRef.current === "berjalan") {
+        void syncDurationToServer(sessionIdRef.current, elapsedRef.current, true);
+      }
+    };
+
+    const handlePageLeave = () => {
+      setIsPageVisible(false);
+      if (isValidUuid(sessionIdRef.current) && statusRef.current === "berjalan") {
+        void syncDurationToServer(sessionIdRef.current, elapsedRef.current, true);
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", handlePageLeave);
+    window.addEventListener("beforeunload", handlePageLeave);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", handlePageLeave);
+      window.removeEventListener("beforeunload", handlePageLeave);
+      if (isValidUuid(sessionIdRef.current) && statusRef.current === "berjalan") {
+        void syncDurationToServer(sessionIdRef.current, elapsedRef.current, true);
+      }
+    };
+  }, [syncDurationToServer]);
+
+  // Timer hanya berjalan saat sesi "berjalan" dan tab/halaman sedang terlihat aktif
+  useEffect(() => {
+    if (!sessionId || evaluationStatus !== "berjalan" || !isPageVisible) return;
     const timer = window.setInterval(() => {
       setElapsedSec((prev) => prev + 1);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [sessionId, evaluationStatus]);
+  }, [sessionId, evaluationStatus, isPageVisible]);
 
   const initializeSession = useCallback(
     async (options?: { force?: boolean; currentElapsedSec?: number }) => {
@@ -88,6 +150,7 @@ export function useSimulationSession({
 
       const startSec = Math.max(0, Math.floor(options?.currentElapsedSec ?? 0));
       setIsStarting(true);
+      setIsPracticumBlocked(false);
       setError(null);
       if (options?.force) {
         setFinishResult(null);
@@ -102,6 +165,7 @@ export function useSimulationSession({
         const localSid = `local-test-${Date.now()}`;
         setSessionId(localSid);
         setIsLocalMode(true);
+        setIsResumed(false);
         setEvaluationStatus("berjalan");
         setElapsedSec(startSec);
         setStudentTurnCount(0);
@@ -133,36 +197,84 @@ export function useSimulationSession({
           waktuMulaiDetik: startSec,
         });
 
+        const resumedFlag = Boolean(started.isResumed);
+        const savedDuration =
+          typeof started.durasiAktifDetik === "number"
+            ? Math.max(0, Math.floor(started.durasiAktifDetik))
+            : startSec;
+        const rawTranscript: ResumedTranscriptItem[] = Array.isArray(started.transcript)
+          ? started.transcript
+          : [];
+
+        const resolvedElapsed = resumedFlag ? savedDuration : startSec;
+        const patientLabel = `Pasien (${started.personaContext.patient.nama})`;
+        const actorLabel = `Anda (${studentName})`;
+
+        let initialMessages: Msg[];
+        let initialTurnCount = 0;
+
+        if (resumedFlag && rawTranscript.length > 0) {
+          initialMessages = rawTranscript.map((row, idx) => {
+            const isStudent = row.pembicara === "mahasiswa";
+            if (isStudent) initialTurnCount += 1;
+            const rowSec =
+              typeof row.waktu_mulai_detik === "number" ? row.waktu_mulai_detik : resolvedElapsed;
+            return {
+              id: row.id || `resumed-${idx}`,
+              from: isStudent ? "anda" : "pasien",
+              name: isStudent ? actorLabel : patientLabel,
+              time: formatMmSs(rowSec),
+              text: row.teks,
+            };
+          });
+        } else {
+          initialMessages = [
+            {
+              id: started.openingTurnId,
+              from: "pasien",
+              name: patientLabel,
+              time: formatMmSs(resolvedElapsed),
+              text: started.openingText,
+            },
+          ];
+        }
+
         setSessionId(started.sessionId);
         setIsLocalMode(false);
+        setIsResumed(resumedFlag);
         setEvaluationStatus(normalizeEvaluationStatus(started.evaluationStatus));
         setPersonaContext(started.personaContext);
-        setElapsedSec(startSec);
-        setStudentTurnCount(0);
+        setElapsedSec(resolvedElapsed);
+        setStudentTurnCount(initialTurnCount);
         setFinishResult(null);
-
-        const patientLabel = `Pasien (${started.personaContext.patient.nama})`;
-        setMessages([
-          {
-            id: started.openingTurnId,
-            from: "pasien",
-            name: patientLabel,
-            time: formatMmSs(startSec),
-            text: started.openingText,
-          },
-        ]);
+        setMessages(initialMessages);
         setIsStarting(false);
         return started.sessionId;
       } catch (err) {
-        return activateLocalTestSession(
-          err instanceof Error ? err.message : "Backend /start belum merespons",
-        );
+        const message =
+          err instanceof Error ? err.message : "Backend /start belum merespons";
+        const practicumBlocked =
+          mode === "praktikum" &&
+          /percobaan mode praktikum.*sudah selesai|409/i.test(message);
+
+        if (practicumBlocked) {
+          setSessionId(null);
+          setIsLocalMode(false);
+          setIsPracticumBlocked(true);
+          setIsResumed(false);
+          setMessages([]);
+          setError(message);
+          setIsStarting(false);
+          return null;
+        }
+
+        return activateLocalTestSession(message);
       }
     },
-    [skenarioId, mode, idMahasiswa, allowLocalFallback],
+    [skenarioId, mode, idMahasiswa, studentName, allowLocalFallback],
   );
 
-  // Mulai sesi saat halaman dibuka atau parameter utama berubah
+  // Mulai atau lanjutkan sesi saat halaman dibuka atau parameter utama berubah
   useEffect(() => {
     if (!skenarioId) return;
     const initKey = `${skenarioId}::${mode}::${idMahasiswa}`;
@@ -180,12 +292,12 @@ export function useSimulationSession({
   const sendMessage = useCallback(
     async (rawText: string, options?: { waktuMulaiDetik?: number; statusAsrValid?: boolean }) => {
       const cleanText = rawText.trim();
-      if (!cleanText || isSending || isFinishing || evaluationStatus !== "berjalan") return;
+      if (!cleanText || isSending || isFinishing || isPracticumBlocked || evaluationStatus !== "berjalan") return;
 
       setIsSending(true);
       setError(null);
 
-      const turnSec = options?.waktuMulaiDetik ?? elapsedSec;
+      const turnSec = options?.waktuMulaiDetik ?? elapsedRef.current;
       const patientLabel = `Pasien (${personaContext?.patient.nama ?? (isLocalMode ? "Mode Uji Ketik" : "Pasien")})`;
       const studentLabel = `Anda (${studentName})`;
       const tempStudentId = `tmp-mhs-${Date.now()}`;
@@ -208,7 +320,6 @@ export function useSimulationSession({
       try {
         let targetSessionId = sessionId;
 
-        // Jika masih memakai ID lokal padahal idMahasiswa tersedia, sinkronkan ke backend /start dulu
         if (!isValidUuid(targetSessionId) && idMahasiswa) {
           const syncedId = await initializeSession({ force: false, currentElapsedSec: turnSec });
           if (isValidUuid(syncedId)) {
@@ -234,12 +345,15 @@ export function useSimulationSession({
         setEvaluationStatus(normalizeEvaluationStatus(res.evaluationStatus));
         setStudentTurnCount(res.studentTurnCount);
 
+        // Sinkronkan durasi aktif saat giliran berhasil tersimpan
+        void syncDurationToServer(targetSessionId, elapsedRef.current, false);
+
         const resolvedPatientLabel = `Pasien (${personaContext?.patient.nama ?? "Pasien"})`;
         const patientReplyMsg: Msg = {
           id: res.turnId,
           from: "pasien",
           name: resolvedPatientLabel,
-          time: formatMmSs(elapsedSec),
+          time: formatMmSs(elapsedRef.current),
           text: res.replyText,
         };
 
@@ -260,7 +374,7 @@ export function useSimulationSession({
               id: `local-reply-${Date.now()}`,
               from: "pasien",
               name: patientLabel,
-              time: formatMmSs(elapsedSec),
+              time: formatMmSs(elapsedRef.current),
               text: `[Balasan Lokal Uji Ketik] Saya mengerti terkait: "${cleanText}". Ada lagi yang ingin ditanyakan atau dijelaskan?`,
             },
           ]);
@@ -281,8 +395,8 @@ export function useSimulationSession({
       sessionId,
       isSending,
       isFinishing,
+      isPracticumBlocked,
       evaluationStatus,
-      elapsedSec,
       personaContext,
       isLocalMode,
       studentName,
@@ -291,6 +405,7 @@ export function useSimulationSession({
       initializeSession,
       skenarioId,
       mode,
+      syncDurationToServer,
       allowLocalFallback,
       studentTurnCount,
     ],
@@ -311,11 +426,14 @@ export function useSimulationSession({
           throw new Error("Sesi lokal tidak memiliki UUID server untuk /finish.");
         }
 
+        const finalSec = elapsedRef.current;
+        await syncDurationToServer(sessionId, finalSec, false);
+
         const res = await finishSimulationApi({
           sessionId,
           skenarioId,
           mode,
-          durasiDetik: elapsedSec,
+          durasiDetik: finalSec,
           forceFinish: options?.forceFinish ?? false,
           discardOnForceFinish: options?.discardOnForceFinish ?? false,
         });
@@ -340,7 +458,7 @@ export function useSimulationSession({
               id: `farewell-${sessionId}`,
               from: "pasien",
               name: patientLabel,
-              time: formatMmSs(elapsedSec),
+              time: formatMmSs(finalSec),
               text: res.farewellMessage!,
             },
           ]);
@@ -372,7 +490,7 @@ export function useSimulationSession({
               id: `farewell-local-${Date.now()}`,
               from: "pasien",
               name: patientLabel,
-              time: formatMmSs(elapsedSec),
+              time: formatMmSs(elapsedRef.current),
               text: farewell,
             },
           ]);
@@ -390,7 +508,7 @@ export function useSimulationSession({
       isSending,
       skenarioId,
       mode,
-      elapsedSec,
+      syncDurationToServer,
       personaContext,
       allowLocalFallback,
       isLocalMode,
@@ -398,11 +516,15 @@ export function useSimulationSession({
   );
 
   const isSessionFinished = evaluationStatus !== "berjalan";
-  const canFinishSession = studentTurnCount >= 1 && !isSending && !isFinishing && !isSessionFinished;
+  const canFinishSession =
+    studentTurnCount >= 1 && !isSending && !isFinishing && !isSessionFinished && !isPracticumBlocked;
 
   return {
     sessionId,
     isLocalMode,
+    isPracticumBlocked,
+    isResumed,
+    isPageVisible,
     evaluationStatus,
     isSessionFinished,
     personaContext,
@@ -418,6 +540,7 @@ export function useSimulationSession({
     error,
     sendMessage,
     finishSession,
+    syncDurationToServer,
     retryStartSession,
   };
 }

@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 
+from app.api.routes.evaluation import router as evaluation_router
 from app.api.routes.simulation import router as simulation_router
 from app.core.config import settings
 
@@ -48,3 +49,4 @@ app.add_middleware(
 )
 
 app.include_router(simulation_router)
+app.include_router(evaluation_router)

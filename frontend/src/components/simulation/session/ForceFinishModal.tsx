@@ -1,21 +1,27 @@
-import { AlertTriangle, Trash2, X } from "lucide-react";
+import { AlertTriangle, Save, Trash2, X } from "lucide-react";
 
 interface ForceFinishModalProps {
   open: boolean;
   isSubmitting: boolean;
+  studentTurnCount?: number;
   missingItems?: string[];
   onCancel: () => void;
+  onConfirmSaveAndFinish: () => void;
   onConfirmDiscardAndFinish: () => void;
 }
 
 export function ForceFinishModal({
   open,
   isSubmitting,
+  studentTurnCount = 0,
   missingItems = [],
   onCancel,
+  onConfirmSaveAndFinish,
   onConfirmDiscardAndFinish,
 }: ForceFinishModalProps) {
   if (!open) return null;
+
+  const isShortSession = studentTurnCount >= 1 && studentTurnCount <= 4;
 
   return (
     <div
@@ -53,12 +59,20 @@ export function ForceFinishModal({
         </div>
 
         <div className="mt-4 space-y-3 text-sm text-slate-600">
-          <p className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs leading-relaxed text-amber-900">
-            <strong>Perhatian:</strong> Syarat penyelesaian atau penggalian informasi belum lengkap.
-            Jika sesi dipaksa selesai sekarang,{" "}
-            <strong>data sesi dan transkrip percakapan tidak akan disimpan</strong> serta tidak
-            menghasilkan rapor penilaian.
-          </p>
+          {isShortSession ? (
+            <p className="rounded-xl border border-sky-200 bg-sky-50/80 p-3 text-xs leading-relaxed text-sky-900">
+              <strong>Sesi Pendek ({studentTurnCount} giliran bicara):</strong> Karena giliran
+              bicara mahasiswa maksimal 4 giliran, Anda tetap dapat memilih{" "}
+              <strong>Simpan Transkrip &amp; Akhiri</strong> agar transkrip tersimpan dengan status{" "}
+              <strong>Tidak Cukup Data</strong>, atau hapus sesi jika tidak ingin menyimpannya.
+            </p>
+          ) : (
+            <p className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs leading-relaxed text-amber-900">
+              <strong>Perhatian:</strong> Syarat penyelesaian atau penggalian informasi belum
+              lengkap. Anda dapat menyimpan transkrip sesi apa adanya atau menghapus sesi tanpa
+              menyimpan data.
+            </p>
+          )}
 
           {missingItems.length > 0 && (
             <div>
@@ -77,12 +91,12 @@ export function ForceFinishModal({
           )}
         </div>
 
-        <div className="mt-6 flex items-center justify-end gap-2.5">
+        <div className="mt-6 flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
             disabled={isSubmitting}
-            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
           >
             Lanjutkan Sesi
           </button>
@@ -91,11 +105,23 @@ export function ForceFinishModal({
             type="button"
             onClick={onConfirmDiscardAndFinish}
             disabled={isSubmitting}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            {isSubmitting ? "Menghapus..." : "Hapus & Akhiri Sesi"}
+            {isSubmitting ? "Memproses..." : "Hapus Sesi"}
           </button>
+
+          {studentTurnCount >= 1 && (
+            <button
+              type="button"
+              onClick={onConfirmSaveAndFinish}
+              disabled={isSubmitting}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-navy-900 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-navy-800 disabled:opacity-50"
+            >
+              <Save className="h-3.5 w-3.5" />
+              {isSubmitting ? "Menyimpan..." : "Simpan Transkrip & Akhiri"}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -1,11 +1,22 @@
 import type { CaseMode } from "@/types/simulation";
 import type { EvaluationStatusEnum, PatientPersonaContext } from "@/types/session";
 
-const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, "") || "";
+const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, "") || "";
 
 export interface TurnHistoryPayload {
   role: "student" | "patient";
   text: string;
+}
+
+export interface ResumedTranscriptItem {
+  id?: string | null;
+  urutan_global?: number | null;
+  kode_giliran?: string | null;
+  nomor_giliran_pembicara?: number | null;
+  pembicara: string;
+  waktu_mulai_detik?: number;
+  teks: string;
 }
 
 export interface StartSimulationApiResponse {
@@ -18,6 +29,9 @@ export interface StartSimulationApiResponse {
   openingText: string;
   personaContext: PatientPersonaContext;
   createdAt: string;
+  isResumed?: boolean;
+  durasiAktifDetik?: number;
+  transcript?: ResumedTranscriptItem[];
 }
 
 export interface SendTurnApiResponse {
@@ -30,6 +44,25 @@ export interface SendTurnApiResponse {
   replyText: string;
   studentTurnCount: number;
   createdAt: string;
+}
+
+export interface FinishChecklistItem {
+  key: string;
+  label: string;
+  satisfied: boolean;
+}
+
+export interface FinishSimulationApiResponse {
+  sessionId: string;
+  canFinish: boolean;
+  evaluationStatus: EvaluationStatusEnum;
+  allTriggersCovered: boolean;
+  followUpPlanDelivered: boolean;
+  missingItems: string[];
+  checklist: FinishChecklistItem[];
+  farewellMessage: string | null;
+  finishedAt: string | null;
+  discarded?: boolean;
 }
 
 export async function startSimulationApi(params: {
@@ -65,6 +98,14 @@ export async function startSimulationApi(params: {
     openingText: data.opening_text,
     personaContext: data.persona_context,
     createdAt: data.created_at,
+    isResumed: Boolean(data.is_resumed ?? data.isResumed ?? false),
+    durasiAktifDetik:
+      typeof data.durasi_aktif_detik === "number"
+        ? data.durasi_aktif_detik
+        : typeof data.durasiAktifDetik === "number"
+          ? data.durasiAktifDetik
+          : 0,
+    transcript: Array.isArray(data.transcript) ? data.transcript : [],
   };
 }
 
@@ -110,35 +151,32 @@ export async function sendSimulationTurnApi(params: {
   };
 }
 
-export interface FinishChecklistItem {
-  key: string;
-  label: string;
-  satisfied: boolean;
-}
-
-export interface FinishSimulationApiResponse {
+export async function pauseSimulationDurationApi(params: {
   sessionId: string;
-  canFinish: boolean;
-  evaluationStatus: EvaluationStatusEnum;
-  allTriggersCovered: boolean;
-  followUpPlanDelivered: boolean;
-  missingItems: string[];
-  checklist: FinishChecklistItem[];
-  farewellMessage: string | null;
-  finishedAt: string | null;
-}
+  durasiDetik: number;
+  keepalive?: boolean;
+}): Promise<{ synced: boolean; durasiAktifDetik?: number }> {
+  const res = await fetch(
+    `${API_BASE}/api/simulation/${encodeURIComponent(params.sessionId)}/pause`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ durasi_detik: Math.max(0, Math.floor(params.durasiDetik)) }),
+      keepalive: params.keepalive ?? false,
+    },
+  );
 
-export interface FinishSimulationApiResponse {
-  sessionId: string;
-  canFinish: boolean;
-  evaluationStatus: EvaluationStatusEnum;
-  allTriggersCovered: boolean;
-  followUpPlanDelivered: boolean;
-  missingItems: string[];
-  checklist: FinishChecklistItem[];
-  farewellMessage: string | null;
-  finishedAt: string | null;
-  discarded?: boolean;
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail || "Gagal menyinkronkan durasi sesi.");
+  }
+
+  const data = await res.json().catch(() => ({}));
+  return {
+    synced: Boolean(data?.synced ?? true),
+    durasiAktifDetik:
+      typeof data?.durasi_aktif_detik === "number" ? data.durasi_aktif_detik : undefined,
+  };
 }
 
 export async function finishSimulationApi(params: {
@@ -179,5 +217,46 @@ export async function finishSimulationApi(params: {
     farewellMessage: typeof data.farewell_message === "string" ? data.farewell_message : null,
     finishedAt: typeof data.finished_at === "string" ? data.finished_at : null,
     discarded: Boolean(data.discarded),
+  };
+}
+
+export interface SaveDocumentationPayload {
+  nama_pasien: string;
+  usia_pasien: string;
+  jenis_kelamin: string;
+  nama_dokter: string;
+  keluhan_diagnosa: string;
+  riwayat_alergi: string;
+  obat_lain_penyerta: string;
+  nama_obat_dosis: string;
+  instruksi_khusus: string;
+  edukasi_tindak_lanjut: string;
+  durasi_pengisian_detik: number;
+  waktu_habis: boolean;
+}
+
+export async function saveSimulationDocumentationApi(
+  sessionId: string,
+  payload: SaveDocumentationPayload,
+): Promise<{ id: string; sessionId: string; saved: boolean }> {
+  const res = await fetch(
+    `${API_BASE}/api/simulation/${encodeURIComponent(sessionId)}/documentation`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail || "Gagal menyimpan dokumentasi kefarmasian.");
+  }
+
+  const data = await res.json();
+  return {
+    id: data.id,
+    sessionId: data.session_id,
+    saved: Boolean(data.saved),
   };
 }

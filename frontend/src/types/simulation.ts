@@ -47,6 +47,7 @@ export interface DashboardData {
   cases: PatientCase[];
   history: SimulationHistory[];
   historyTotal: number;
+  completedPracticumIds?: string[];
 }
 
 // =========================================
@@ -64,6 +65,7 @@ export interface PatientCase {
   diagnosis: string;
   focus: string;
   deadline?: string; // Opsional, kasus mandiri tidak punya deadline
+  isPracticumCompleted?: boolean; // True jika percobaan mode praktikum sudah selesai
 }
 
 export interface CaseDetail extends PatientCase {
@@ -148,7 +150,7 @@ export interface ChronicPrescription {
 }
 
 // =========================================
-// 8. TIPE PENYELESAIAN SESI (FINISH & FORCE FINISH)
+// 8. TIPE RESUME & PENYELESAIAN SESI (PAUSE, FINISH & FORCE FINISH)
 // =========================================
 export type SessionEvaluationEnum =
   | "berjalan"
@@ -157,6 +159,16 @@ export type SessionEvaluationEnum =
   | "selesai_ditinjau"
   | "tidak_cukup_data"
   | "tidak_dapat_dinilai";
+
+export interface ResumedTranscriptRow {
+  id?: string | null;
+  urutan_global?: number | null;
+  kode_giliran?: string | null;
+  nomor_giliran_pembicara?: number | null;
+  pembicara: "pasien" | "mahasiswa" | string;
+  waktu_mulai_detik?: number;
+  teks: string;
+}
 
 export interface FinishChecklistItem {
   key: string;
@@ -183,4 +195,5 @@ export interface SimulationFinishResult {
   checklist: FinishChecklistItem[];
   farewell_message: string | null;
   finished_at: string | null;
+  discarded?: boolean;
 }

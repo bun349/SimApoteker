@@ -1,4 +1,3 @@
-// components/dashboard/MicStatus.tsx
 import { useEffect } from "react";
 import { Mic, Volume2 } from "lucide-react";
 import { useMicStore } from "@/store/micStore";
@@ -6,32 +5,48 @@ import { cn } from "@/lib/utils";
 
 export function MicStatus() {
   const { status, deviceLabel, level, check, test } = useMicStore();
-  useEffect(() => { check(); }, [check]);
+  useEffect(() => {
+    check();
+  }, [check]);
 
   const label = {
-    idle: "Memeriksa...", checking: "Memeriksa...",
-    ready: "Mikrofon Siap:", denied: "Izin Mikrofon Ditolak",
-    not_found: "Mikrofon Tidak Ditemukan",
+    idle: "Memeriksa mikrofon...",
+    checking: "Memeriksa mikrofon...",
+    ready: "Mikrofon siap",
+    denied: "Izin mikrofon ditolak",
+    not_found: "Mikrofon tidak ditemukan",
   }[status];
 
   return (
-    <div className="inline-flex items-center gap-3 rounded-full border border-line bg-white px-4 py-2 text-xs shadow-sm">
-      <span className={cn("h-2 w-2 rounded-full",
-        status === "ready" ? "bg-lime-500" : status === "checking" ? "bg-amber-400" : "bg-red-500")} />
-      <Mic size={12} className="text-muted" />
+    <div className="inline-flex flex-wrap items-center gap-2.5 rounded-lg border border-line bg-white px-3 py-1.5 text-xs text-muted">
+      <span
+        className={cn(
+          "h-2 w-2 rounded-full",
+          status === "ready"
+            ? "bg-emerald-500"
+            : status === "checking" || status === "idle"
+              ? "bg-amber-400"
+              : "bg-red-500",
+        )}
+      />
+      <Mic size={13} />
       <span>
-        <b className="font-semibold">{label}</b>{" "}
-        {status === "ready" && <span className="text-muted">{deviceLabel} terdeteksi</span>}
+        <span className="font-medium text-ink">{label}</span>
+        {status === "ready" && deviceLabel ? ` · ${deviceLabel}` : ""}
       </span>
       <button
+        type="button"
         onClick={status === "ready" ? test : check}
-        className="flex items-center gap-1 font-semibold text-navy-900"
+        className="inline-flex items-center gap-1 font-medium text-navy-900 hover:underline"
       >
-        <Volume2 size={12} /> {status === "ready" ? "Uji" : "Coba Lagi"}
+        <Volume2 size={12} /> {status === "ready" ? "Uji" : "Coba lagi"}
       </button>
       {level > 0 && (
-        <span className="h-1.5 w-16 overflow-hidden rounded bg-gray-200">
-          <span className="block h-full bg-lime-500 transition-all" style={{ width: `${level * 100}%` }} />
+        <span className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-200">
+          <span
+            className="block h-full bg-emerald-500 transition-all"
+            style={{ width: `${level * 100}%` }}
+          />
         </span>
       )}
     </div>

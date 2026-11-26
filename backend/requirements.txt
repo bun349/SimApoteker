@@ -9,3 +9,4 @@ librosa
 python-multipart
 python-dotenv
 supabase
+pydantic_settings

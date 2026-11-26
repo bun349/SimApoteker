@@ -20,6 +20,30 @@ class SimulationRepository(Protocol):
         mode: str,
     ) -> dict[str, Any] | None: ...
 
+    async def get_active_session(
+        self,
+        *,
+        id_mahasiswa: str,
+        id_skenario: str,
+        mode: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def has_completed_practicum_attempt(
+        self,
+        *,
+        id_mahasiswa: str,
+        id_skenario: str,
+    ) -> bool: ...
+
+    async def get_session_by_id(self, session_id: str) -> dict[str, Any] | None: ...
+
+    async def update_active_duration(
+        self,
+        *,
+        session_id: str,
+        durasi_aktif_detik: int,
+    ) -> None: ...
+
     async def create_session_with_opening(
         self,
         *,
@@ -53,6 +77,20 @@ def _parse_dt(value: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _sanitize_persona_for_mode(persona_context: Any, mode: str) -> Any:
+    if mode != "praktikum" or persona_context is None:
+        return persona_context
+    if hasattr(persona_context, "model_copy"):
+        return persona_context.model_copy(
+            update={
+                "key_info_triggers": [],
+                "cue_triggers": [],
+                "probe_triggers": [],
+            }
+        )
+    return persona_context
+
+
 class SimulationTurnService:
     def __init__(
         self,
@@ -76,6 +114,52 @@ class SimulationTurnService:
         if not opening_text:
             raise ValueError("Kalimat pembuka skenario belum tersedia.")
 
+        active_session = await self.repo.get_active_session(
+            id_mahasiswa=req.id_mahasiswa,
+            id_skenario=req.skenario_id,
+            mode=req.mode,
+        )
+        if active_session:
+            session_id = str(active_session["id"])
+            transcript = await self.repo.get_session_transcript(session_id)
+            opening_row = transcript[0] if transcript else {}
+            safe_persona = _sanitize_persona_for_mode(persona_context, req.mode)
+            created_at = _parse_dt(
+                active_session.get("waktu_mulai") or active_session.get("created_at")
+            )
+            extra_resume_fields: dict[str, Any] = {}
+            if "is_resumed" in StartSimulationResponse.model_fields:
+                extra_resume_fields["is_resumed"] = True
+            if "durasi_aktif_detik" in StartSimulationResponse.model_fields:
+                extra_resume_fields["durasi_aktif_detik"] = int(
+                    active_session.get("durasi_aktif_detik") or 0
+                )
+            if "transcript" in StartSimulationResponse.model_fields:
+                extra_resume_fields["transcript"] = transcript
+
+            return StartSimulationResponse(
+                session_id=session_id,
+                skenario_id=req.skenario_id,
+                mode=req.mode,
+                status_evaluasi=str(active_session.get("status_evaluasi") or "berjalan"),
+                opening_turn_id=str(opening_row.get("id") or ""),
+                opening_kode_giliran=str(opening_row.get("kode_giliran") or "PSN-01"),
+                opening_text=str(opening_row.get("teks") or opening_text),
+                persona_context=safe_persona,
+                created_at=created_at,
+                **extra_resume_fields,
+            )
+
+        if req.mode == "praktikum":
+            already_completed = await self.repo.has_completed_practicum_attempt(
+                id_mahasiswa=req.id_mahasiswa,
+                id_skenario=req.skenario_id,
+            )
+            if already_completed:
+                raise PermissionError(
+                    "Percobaan mode praktikum untuk skenario ini sudah selesai."
+                )
+
         created_pair = await self.repo.create_session_with_opening(
             skenario_id=req.skenario_id,
             mode=req.mode,
@@ -87,7 +171,19 @@ class SimulationTurnService:
             raise RuntimeError("Data sesi atau kalimat pembuka gagal dibuat oleh repository.")
 
         session_row, opening_row = created_pair
-        created_at = _parse_dt(session_row.get("created_at") or opening_row.get("created_at"))
+        created_at = _parse_dt(
+            session_row.get("waktu_mulai")
+            or session_row.get("created_at")
+            or opening_row.get("created_at")
+        )
+        safe_persona = _sanitize_persona_for_mode(persona_context, req.mode)
+        extra_new_fields: dict[str, Any] = {}
+        if "is_resumed" in StartSimulationResponse.model_fields:
+            extra_new_fields["is_resumed"] = False
+        if "durasi_aktif_detik" in StartSimulationResponse.model_fields:
+            extra_new_fields["durasi_aktif_detik"] = int(
+                session_row.get("durasi_aktif_detik") or 0
+            )
 
         return StartSimulationResponse(
             session_id=str(session_row["id"]),
@@ -97,9 +193,41 @@ class SimulationTurnService:
             opening_turn_id=str(opening_row["id"]),
             opening_kode_giliran="PSN-01",
             opening_text=opening_text,
-            persona_context=persona_context,
+            persona_context=safe_persona,
             created_at=created_at,
+            **extra_new_fields,
         )
+
+    async def sync_active_duration(
+        self,
+        *,
+        session_id: str,
+        durasi_detik: int,
+    ) -> dict[str, Any]:
+        session_row = await self.repo.get_session_by_id(session_id)
+        if not session_row:
+            raise LookupError("Sesi simulasi tidak ditemukan.")
+
+        status_eval = str(session_row.get("status_evaluasi") or "")
+        safe_duration = max(0, int(durasi_detik))
+        if status_eval == "berjalan":
+            await self.repo.update_active_duration(
+                session_id=session_id,
+                durasi_aktif_detik=safe_duration,
+            )
+            return {
+                "session_id": session_id,
+                "status_evaluasi": status_eval,
+                "durasi_aktif_detik": safe_duration,
+                "synced": True,
+            }
+
+        return {
+            "session_id": session_id,
+            "status_evaluasi": status_eval,
+            "durasi_aktif_detik": int(session_row.get("durasi_aktif_detik") or 0),
+            "synced": False,
+        }
 
     async def process_turn(self, req: SimulationTurnRequest) -> SimulationTurnResponse:
         scenario_row = await self.repo.get_scenario_for_simulation(
@@ -111,7 +239,6 @@ class SimulationTurnService:
 
         persona_context = build_patient_persona_context(scenario_row)
 
-        # Ambil transkrip tersimpan di DB sebagai sumber kebenaran urutan giliran
         db_rows = await self.repo.get_session_transcript(req.session_id)
 
         if db_rows:
@@ -132,8 +259,6 @@ class SimulationTurnService:
                 default=0,
             )
         else:
-            # Fallback jika opening_line belum di-insert saat init sesi:
-            # anggap kalimat_pembuka sebagai urutan 1 (PSN-01) bila ada di history frontend
             history = list(req.history)
             last_urutan = len(history)
             last_mhs_num = sum(1 for h in history if h.role == "student")

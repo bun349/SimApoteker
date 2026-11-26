@@ -34,21 +34,40 @@ const DEFAULT_INSTRUKSI: Record<CaseCategory, string> = {
 };
 
 // Fungsi utilitas untuk mem-parsing JSONB profil pasien dan klinis (Katalog)
-const extractNama = (p: unknown) => (isObj(p) ? str(p.nama_pasien) || "Pasien Anonim" : "Pasien Anonim");
+const extractNama = (p: unknown) =>
+  isObj(p) ? str(p.nama_pasien) || str(p.nama) || "Pasien" : "Pasien";
 
 const extractMeta = (p: unknown) => {
-  if (!isObj(p)) return "Tidak ada data demografi";
+  if (!isObj(p)) return "Pasien";
+  const peran = str(p.peran_komunikasi) || str(p.peran);
   const kategoriUsia = str(p.kategori_usia);
   const jk = str(p.jenis_kelamin);
-  return [kategoriUsia, jk].filter(Boolean).join(" • ") || "Tidak ada data demografi";
+  return [peran, kategoriUsia, jk].filter(Boolean).join(" · ") || "Pasien";
 };
 
-const extractDiagnosis = (k: unknown) => {
-  if (!isObj(k)) return "Konseling KIE";
-  const akut = isObj(k.resep_akut) ? k.resep_akut : undefined;
-  const swa = isObj(k.swamedikasi) ? k.swamedikasi : undefined;
-  const kronis = isObj(k.resep_kronis) ? k.resep_kronis : undefined;
-  return str(akut?.diagnosis) || str(swa?.jenis_keluhan) || str(kronis?.diagnosis) || "Konseling KIE";
+const normalizeCategory = (jenis: unknown): CaseCategory => {
+  const low = str(jenis).toLowerCase();
+  if (low === "resep_akut" || low === "resep akut") return "RESEP AKUT";
+  if (low === "resep_kronis" || low === "resep kronis") return "RESEP KRONIS";
+  return "SWAMEDIKASI";
+};
+
+const extractDiagnosis = (k: unknown, judul?: unknown, fokus?: unknown) => {
+  const title = str(judul);
+  if (title) return title;
+  if (isObj(k)) {
+    const akut = isObj(k.resep_akut) ? k.resep_akut : undefined;
+    const swa = isObj(k.swamedikasi) ? k.swamedikasi : undefined;
+    const kronis = isObj(k.resep_kronis) ? k.resep_kronis : undefined;
+    const fromKlinis =
+      str(akut?.diagnosis) ||
+      str(swa?.jenis_keluhan) ||
+      str(kronis?.diagnosis) ||
+      str(k.keluhan_utama) ||
+      str(k.diagnosis_utama);
+    if (fromKlinis) return fromKlinis;
+  }
+  return str(fokus) || "Konseling KIE";
 };
 
 function splitDokter(s: string): { nama: string; sip: string } {
@@ -183,52 +202,101 @@ export async function fetchCaseCatalog(mode: CaseMode): Promise<PatientCase[]> {
   if (mode === "mandiri") {
     const { data, error } = await supabase
       .from("skenario_praktikum")
-      .select("id, kode_skenario, versi, judul, jenis, mode_rilis, profil_pasien, fokus_kie, data_klinis_khusus")
+      .select(
+        "id, kode_skenario, versi, judul, jenis, mode_rilis, profil_pasien, fokus_kie, instruksi_tugas, data_klinis_khusus, created_at",
+      )
       .eq("status_rilis", "diterbitkan")
-      .not("frozen_at", "is", null)
-      .contains("mode_rilis", ["mandiri"]);
+      .contains("mode_rilis", ["mandiri"])
+      .order("created_at", { ascending: false });
 
     if (error) throw error;
 
     return (data || []).map((r: any) => ({
       id: r.id,
-      category: r.jenis,
+      category: normalizeCategory(r.jenis),
       modes: r.mode_rilis || ["mandiri"],
       estimatedMinutes: "~10 - 15 Menit",
       patientName: extractNama(r.profil_pasien),
       patientMeta: extractMeta(r.profil_pasien),
-      diagnosis: extractDiagnosis(r.data_klinis_khusus),
-      focus: r.fokus_kie || "Latihan KIE Mandiri",
+      diagnosis: extractDiagnosis(r.data_klinis_khusus, r.judul, r.fokus_kie),
+      focus: str(r.fokus_kie) || str(r.instruksi_tugas) || "Latihan KIE Mandiri",
     }));
   }
 
-  const { data, error } = await supabase
+  const completedPracticumSet = new Set<string>();
+  let studentClassId: string | null = null;
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (user) {
+    const { data: profil } = await supabase
+      .from("pengguna")
+      .select("id, id_kelas")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+
+    if (profil?.id_kelas) {
+      studentClassId = profil.id_kelas;
+    }
+
+    if (profil?.id) {
+      const { data: completedRows } = await supabase
+        .from("sesi_simulasi")
+        .select("id_skenario")
+        .eq("id_mahasiswa", profil.id)
+        .eq("mode", "praktikum")
+        .in("status_evaluasi", [
+          "selesai_otomatis",
+          "perlu_ditinjau_dosen",
+          "selesai_ditinjau",
+        ]);
+
+      for (const row of (completedRows as Array<{ id_skenario?: string | null }> | null) || []) {
+        if (typeof row.id_skenario === "string" && row.id_skenario) {
+          completedPracticumSet.add(row.id_skenario);
+        }
+      }
+    }
+  }
+
+  let tugasQuery = supabase
     .from("tugas_praktikum")
     .select(`
-      id, deadline, status,
+      id, id_kelas, deadline, status,
       skenario:skenario_praktikum (
-        id, kode_skenario, versi, judul, jenis, mode_rilis, profil_pasien, fokus_kie, data_klinis_khusus
+        id, kode_skenario, versi, judul, jenis, mode_rilis, profil_pasien, fokus_kie, instruksi_tugas, data_klinis_khusus
       )
     `)
-    .eq("status", "Aktif");
+    .eq("status", "Aktif")
+    .order("deadline", { ascending: true });
 
+  if (studentClassId) {
+    tugasQuery = tugasQuery.eq("id_kelas", studentClassId);
+  }
+
+  const { data, error } = await tugasQuery;
   if (error) throw error;
 
-  return (data || []).map((t: any) => {
-    const s = Array.isArray(t.skenario) ? t.skenario[0] : t.skenario;
-    return {
-      id: s.id,
-      tugasId: t.id,
-      category: s.jenis,
-      modes: s.mode_rilis || ["praktikum"],
-      estimatedMinutes: "~15 - 20 Menit",
-      patientName: extractNama(s.profil_pasien),
-      patientMeta: extractMeta(s.profil_pasien),
-      diagnosis: extractDiagnosis(s.data_klinis_khusus),
-      focus: s.fokus_kie || "Ujian Praktikum KIE",
-      deadline: t.deadline,
-    };
-  });
+  return (data || [])
+    .map((t: any): PatientCase | null => {
+      const s = Array.isArray(t.skenario) ? t.skenario[0] : t.skenario;
+      if (!s?.id) return null;
+      return {
+        id: s.id,
+        tugasId: t.id,
+        category: normalizeCategory(s.jenis),
+        modes: s.mode_rilis || ["praktikum"],
+        estimatedMinutes: "~15 - 20 Menit",
+        patientName: extractNama(s.profil_pasien),
+        patientMeta: extractMeta(s.profil_pasien),
+        diagnosis: extractDiagnosis(s.data_klinis_khusus, s.judul, s.fokus_kie),
+        focus: str(s.fokus_kie) || str(s.instruksi_tugas) || "Ujian Praktikum KIE",
+        deadline: t.deadline,
+        isPracticumCompleted: completedPracticumSet.has(s.id),
+      };
+    })
+    .filter((item): item is PatientCase => item !== null);
 }
 
 // =========================================

@@ -24,20 +24,20 @@ export function TranscriptPanel({ messages, fontSize, onFontSize, typing = false
   }, [messages.length, typing]);
 
   return (
-    <section className="flex min-h-[460px] flex-col overflow-hidden rounded-2xl border border-line bg-white shadow-sm lg:h-full lg:min-h-0">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-sky-50/60 px-5 py-4">
-        <h2 className="flex items-center gap-2 font-serif text-base font-bold">
-          <MessagesSquare size={18} /> Transkrip Percakapan
-          <span className="rounded-full bg-sky-100 px-2.5 py-0.5 font-sans text-[11px] font-semibold text-navy-800">
-            {messages.length} Pesan
+    <section className="flex min-h-[420px] flex-col overflow-hidden rounded-xl border border-line bg-white lg:h-full lg:min-h-0">
+      <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <MessagesSquare size={16} className="text-muted" /> Transkrip Percakapan
+          <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-muted">
+            {messages.length}
           </span>
         </h2>
-        <div className="inline-flex overflow-hidden rounded-lg border border-line bg-white text-xs font-bold">
+        <div className="inline-flex overflow-hidden rounded-lg border border-line bg-white text-xs font-medium text-muted">
           <button
             type="button"
             onClick={() => onFontSize(-1)}
             aria-label="Perkecil teks"
-            className="px-3 py-1.5 hover:bg-cream"
+            className="px-2.5 py-1 transition hover:bg-slate-50 hover:text-ink"
           >
             A−
           </button>
@@ -45,26 +45,37 @@ export function TranscriptPanel({ messages, fontSize, onFontSize, typing = false
             type="button"
             onClick={() => onFontSize(1)}
             aria-label="Perbesar teks"
-            className="border-l border-line px-3 py-1.5 hover:bg-cream"
+            className="border-l border-line px-2.5 py-1 transition hover:bg-slate-50 hover:text-ink"
           >
             A+
           </button>
         </div>
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5" style={{ fontSize }} aria-live="polite">
+      <div
+        className="flex-1 space-y-4 overflow-y-auto px-5 py-5"
+        style={{ fontSize }}
+        aria-live="polite"
+      >
         {messages.map((m) => {
           const me = m.from === "anda";
           return (
             <div key={m.id} className={cn("flex flex-col", me ? "items-end" : "items-start")}>
-              <div className={cn("mb-1 flex items-center gap-3 text-[11px] font-semibold", me && "flex-row-reverse")}>
-                <span className={me ? "text-amber-700" : "text-navy-900"}>{m.name}</span>
-                <span className="font-mono text-muted">{m.time}</span>
+              <div
+                className={cn(
+                  "mb-1 flex items-center gap-2 text-xs text-muted",
+                  me && "flex-row-reverse",
+                )}
+              >
+                <span className="font-medium text-ink">{m.name}</span>
+                <span className="tabular-nums">{m.time}</span>
               </div>
               <p
                 className={cn(
-                  "max-w-[85%] whitespace-pre-line rounded-2xl border px-5 py-3.5 font-serif leading-relaxed",
-                  me ? "border-gold-400/50 bg-gold-100" : "border-line bg-white",
+                  "max-w-[85%] whitespace-pre-line rounded-2xl px-4 py-3 leading-relaxed",
+                  me
+                    ? "bg-navy-900 text-white"
+                    : "border border-line bg-slate-50 text-ink",
                 )}
               >
                 {m.text}
@@ -74,11 +85,11 @@ export function TranscriptPanel({ messages, fontSize, onFontSize, typing = false
         })}
 
         {typing && (
-          <p className="flex items-center gap-3 pt-1 text-xs italic text-muted">
+          <p className="flex items-center gap-2.5 pt-1 text-xs text-muted">
             <span className="flex gap-1" aria-hidden>
-              <span className="h-2 w-2 animate-bounce rounded-full bg-navy-800/60 [animation-delay:-0.3s]" />
-              <span className="h-2 w-2 animate-bounce rounded-full bg-navy-800/60 [animation-delay:-0.15s]" />
-              <span className="h-2 w-2 animate-bounce rounded-full bg-navy-800/60" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.3s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.15s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" />
             </span>
             Pasien sedang menanggapi...
           </p>
